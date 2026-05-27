@@ -1,0 +1,794 @@
+use std::{
+    env,
+    error::Error,
+    fs::{self, File, OpenOptions},
+    io::{ErrorKind, Read, Write},
+    path::{Path, PathBuf},
+    process::{Command, Output},
+    sync::atomic::{AtomicUsize, Ordering},
+    time::{Duration, Instant},
+};
+
+#[cfg(unix)]
+use std::os::unix::fs::{FileTypeExt, symlink};
+
+use serde_json::Value;
+
+static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+
+fn unique_dir(prefix: &str) -> PathBuf {
+    let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
+    env::temp_dir().join(format!(
+        "workspace-portal-{prefix}-{}-{id}",
+        std::process::id()
+    ))
+}
+
+fn bin_path() -> &'static Path {
+    Path::new(env!("CARGO_BIN_EXE_workspace-portal"))
+}
+
+fn run(args: &[&str], envs: &[(&str, &Path)]) -> Output {
+    let mut command = Command::new(bin_path());
+    command.args(args);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    command.output().expect("failed to run workspace-portal")
+}
+
+fn output_text(output: &Output) -> String {
+    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
+    if !output.stderr.is_empty() {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&String::from_utf8_lossy(&output.stderr));
+    }
+    text
+}
+
+fn wait_for(timeout: Duration, mut predicate: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if predicate() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    predicate()
+}
+
+fn dev_fuse_available() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let fuse_device = Path::new("/dev/fuse");
+        return fuse_device.exists()
+            && fs::metadata(fuse_device)
+                .map(|m| m.file_type().is_char_device())
+                .unwrap_or(false);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
+fn command_in_path(command: &str) -> bool {
+    env::var_os("PATH").is_some_and(|paths| {
+        env::split_paths(&paths).any(|dir| {
+            let candidate = dir.join(command);
+            candidate.exists() && candidate.is_file()
+        })
+    })
+}
+
+fn looks_like_mount_permission_error(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    [
+        "operation not permitted",
+        "permission denied",
+        "failed to mount",
+        "mount failed",
+        "not permitted",
+        "fusermount3",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+}
+
+struct Fixture {
+    root: PathBuf,
+    workspace: PathBuf,
+    state_home: PathBuf,
+    runtime_dir: PathBuf,
+    docs_target: PathBuf,
+    notes_target: PathBuf,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let root = unique_dir("fuse-e2e");
+        let workspace = root.join("workspace");
+        let state_home = root.join("xdg-state");
+        let runtime_dir = root.join("xdg-runtime");
+        let docs_target = root.join("docs-target");
+        let notes_target = root.join("notes-target");
+
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&state_home).unwrap();
+        fs::create_dir_all(&runtime_dir).unwrap();
+        fs::create_dir_all(&docs_target).unwrap();
+        fs::create_dir_all(&notes_target).unwrap();
+
+        Self {
+            root,
+            workspace,
+            state_home,
+            runtime_dir,
+            docs_target,
+            notes_target,
+        }
+    }
+
+    fn envs(&self) -> [(&str, &Path); 2] {
+        [
+            ("XDG_STATE_HOME", self.state_home.as_path()),
+            ("XDG_RUNTIME_DIR", self.runtime_dir.as_path()),
+        ]
+    }
+
+    fn workspace_arg(&self) -> String {
+        self.workspace.display().to_string()
+    }
+
+    fn docs_target_arg(&self) -> String {
+        self.docs_target.display().to_string()
+    }
+
+    fn notes_target_arg(&self) -> String {
+        self.notes_target.display().to_string()
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = run(
+            &[
+                "stop",
+                "--workspace",
+                &self.workspace_arg(),
+                "--force",
+                "--lazy",
+            ],
+            &self.envs(),
+        );
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+fn status_json(fixture: &Fixture) -> Value {
+    let status = run(
+        &["status", "--workspace", &fixture.workspace_arg(), "--json"],
+        &fixture.envs(),
+    );
+    assert!(status.status.success(), "{}", output_text(&status));
+    serde_json::from_slice(&status.stdout).expect("valid status json")
+}
+
+fn wait_for_mounted_state(fixture: &Fixture, expected: bool) {
+    assert!(
+        wait_for(Duration::from_secs(10), || {
+            status_json(fixture)["mounted"].as_bool() == Some(expected)
+        }),
+        "workspace mounted state never became {expected}"
+    );
+}
+
+fn wait_for_mounted_file_contents(path: &Path, expected: &str) -> bool {
+    wait_for(Duration::from_secs(5), || {
+        fs::read_to_string(path)
+            .map(|contents| contents == expected)
+            .unwrap_or(false)
+    })
+}
+
+fn start_rw_workspace(fixture: &Fixture) {
+    start_workspace(fixture);
+
+    let add = run(
+        &[
+            "add",
+            &fixture.docs_target_arg(),
+            "docs",
+            "--workspace",
+            &fixture.workspace_arg(),
+            "--rw",
+        ],
+        &fixture.envs(),
+    );
+    assert!(add.status.success(), "{}", output_text(&add));
+}
+
+fn start_workspace(fixture: &Fixture) {
+    let start = run(
+        &["start", &fixture.workspace_arg(), "--bg"],
+        &fixture.envs(),
+    );
+    assert!(start.status.success(), "{}", output_text(&start));
+    wait_for_mounted_state(fixture, true);
+}
+
+fn mounted_entry_names(fixture: &Fixture) -> Result<Vec<String>, Box<dyn Error>> {
+    let mut names = Vec::new();
+    for entry in fs::read_dir(&fixture.workspace)? {
+        names.push(entry?.file_name().to_string_lossy().into_owned());
+    }
+    names.sort();
+    Ok(names)
+}
+
+fn prerequisite_skip_reason() -> Option<String> {
+    if !cfg!(target_os = "linux") {
+        return Some("FUSE E2E requires Linux".to_owned());
+    }
+
+    if !dev_fuse_available() {
+        return Some(
+            "FUSE E2E requires real /dev/fuse access, but /dev/fuse is unavailable".to_owned(),
+        );
+    }
+
+    if !command_in_path("fusermount3") {
+        return Some(
+            "FUSE E2E requires fusermount3, but it is unavailable in this environment".to_owned(),
+        );
+    }
+
+    let probe = Fixture::new();
+    fs::write(probe.docs_target.join("probe.txt"), "probe").unwrap();
+
+    let start = run(&["start", &probe.workspace_arg(), "--bg"], &probe.envs());
+    if start.status.success() {
+        wait_for_mounted_state(&probe, true);
+        let stop = run(
+            &[
+                "stop",
+                "--workspace",
+                &probe.workspace_arg(),
+                "--force",
+                "--lazy",
+            ],
+            &probe.envs(),
+        );
+        assert!(stop.status.success(), "{}", output_text(&stop));
+        return None;
+    }
+
+    let text = output_text(&start);
+    if looks_like_mount_permission_error(&text) {
+        return Some(format!(
+            "FUSE E2E mount failed; this usually means the Podman runtime lacks /dev/fuse access, CAP_SYS_ADMIN, supplementary group access, or required LSM permissions: {text}"
+        ));
+    }
+
+    panic!("unexpected failure while probing FUSE mount support:\n{text}");
+}
+
+fn require_fuse_prerequisites() {
+    if let Some(reason) = prerequisite_skip_reason() {
+        panic!("{reason}");
+    }
+}
+
+#[test]
+#[ignore]
+fn fuse_e2e_happy_path_covers_mount_read_write_remove_and_unmount() -> Result<(), Box<dyn Error>> {
+    require_fuse_prerequisites();
+
+    let fixture = Fixture::new();
+    fs::write(fixture.docs_target.join("readme.txt"), "read-through-mount")?;
+
+    let start = run(
+        &["start", &fixture.workspace_arg(), "--bg"],
+        &fixture.envs(),
+    );
+    assert!(start.status.success(), "{}", output_text(&start));
+    wait_for_mounted_state(&fixture, true);
+
+    let add = run(
+        &[
+            "add",
+            &fixture.docs_target_arg(),
+            "docs",
+            "--workspace",
+            &fixture.workspace_arg(),
+            "--rw",
+        ],
+        &fixture.envs(),
+    );
+    assert!(add.status.success(), "{}", output_text(&add));
+
+    let mount_read = fs::read_to_string(fixture.workspace.join("docs/readme.txt"))?;
+    assert_eq!(mount_read, "read-through-mount");
+
+    fs::write(
+        fixture.workspace.join("docs/written.txt"),
+        "written through mount",
+    )?;
+    assert_eq!(
+        fs::read_to_string(fixture.docs_target.join("written.txt"))?,
+        "written through mount"
+    );
+
+    fs::rename(
+        fixture.workspace.join("docs/written.txt"),
+        fixture.workspace.join("docs/renamed.txt"),
+    )?;
+    assert!(!fixture.docs_target.join("written.txt").exists());
+    assert_eq!(
+        fs::read_to_string(fixture.docs_target.join("renamed.txt"))?,
+        "written through mount"
+    );
+
+    let rm = run(
+        &["rm", "docs", "--workspace", &fixture.workspace_arg()],
+        &fixture.envs(),
+    );
+    assert!(rm.status.success(), "{}", output_text(&rm));
+
+    assert!(
+        wait_for(Duration::from_secs(5), || !fixture
+            .workspace
+            .join("docs")
+            .exists()),
+        "mounted entry never disappeared after removal"
+    );
+
+    let stop = run(
+        &["stop", "--workspace", &fixture.workspace_arg()],
+        &fixture.envs(),
+    );
+    assert!(stop.status.success(), "{}", output_text(&stop));
+    wait_for_mounted_state(&fixture, false);
+
+    assert!(fixture.workspace.read_dir()?.next().is_none());
+
+    Ok(())
+}
+
+#[test]
+#[ignore]
+#[cfg(unix)]
+fn fuse_e2e_symlinks_cover_traversal_and_broken_targets() -> Result<(), Box<dyn Error>> {
+    require_fuse_prerequisites();
+
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.docs_target.join("nested"))?;
+    fs::write(
+        fixture.docs_target.join("nested/payload.txt"),
+        "symlink-traversal",
+    )?;
+    symlink(
+        "nested/payload.txt",
+        fixture.docs_target.join("shortcut.txt"),
+    )?;
+    symlink("nested", fixture.docs_target.join("linked-dir"))?;
+
+    let start = run(
+        &["start", &fixture.workspace_arg(), "--bg"],
+        &fixture.envs(),
+    );
+    assert!(start.status.success(), "{}", output_text(&start));
+    wait_for_mounted_state(&fixture, true);
+
+    let add = run(
+        &[
+            "add",
+            &fixture.docs_target_arg(),
+            "docs",
+            "--workspace",
+            &fixture.workspace_arg(),
+            "--rw",
+        ],
+        &fixture.envs(),
+    );
+    assert!(add.status.success(), "{}", output_text(&add));
+
+    let shortcut = fixture.workspace.join("docs/shortcut.txt");
+    assert!(fs::symlink_metadata(&shortcut)?.file_type().is_symlink());
+    assert_eq!(fs::read_to_string(&shortcut)?, "symlink-traversal");
+
+    let traversed_dir = fixture.workspace.join("docs/linked-dir/payload.txt");
+    assert_eq!(fs::read_to_string(&traversed_dir)?, "symlink-traversal");
+
+    fs::remove_file(fixture.docs_target.join("nested/payload.txt"))?;
+    assert!(fs::symlink_metadata(&shortcut)?.file_type().is_symlink());
+    let broken_read = fs::read_to_string(&shortcut).unwrap_err();
+    assert_eq!(broken_read.kind(), ErrorKind::NotFound);
+
+    let stop = run(
+        &["stop", "--workspace", &fixture.workspace_arg()],
+        &fixture.envs(),
+    );
+    assert!(stop.status.success(), "{}", output_text(&stop));
+    wait_for_mounted_state(&fixture, false);
+
+    Ok(())
+}
+
+#[test]
+#[ignore]
+fn fuse_e2e_soft_revocation_and_status_coherency_covers_multiple_active_entries()
+-> Result<(), Box<dyn Error>> {
+    require_fuse_prerequisites();
+
+    let fixture = Fixture::new();
+    fs::write(fixture.docs_target.join("alpha.txt"), "alpha-v1")?;
+    fs::write(fixture.notes_target.join("beta.txt"), "beta-v1")?;
+
+    let start = run(
+        &["start", &fixture.workspace_arg(), "--bg"],
+        &fixture.envs(),
+    );
+    assert!(start.status.success(), "{}", output_text(&start));
+    wait_for_mounted_state(&fixture, true);
+
+    let add_docs = run(
+        &[
+            "add",
+            &fixture.docs_target_arg(),
+            "docs",
+            "--workspace",
+            &fixture.workspace_arg(),
+            "--rw",
+        ],
+        &fixture.envs(),
+    );
+    assert!(add_docs.status.success(), "{}", output_text(&add_docs));
+
+    let add_notes = run(
+        &[
+            "add",
+            &fixture.notes_target_arg(),
+            "notes",
+            "--workspace",
+            &fixture.workspace_arg(),
+            "--ro",
+        ],
+        &fixture.envs(),
+    );
+    assert!(add_notes.status.success(), "{}", output_text(&add_notes));
+
+    assert!(
+        wait_for(Duration::from_secs(5), || {
+            mounted_entry_names(&fixture)
+                .map(|names| names == vec!["docs".to_owned(), "notes".to_owned()])
+                .unwrap_or(false)
+        }),
+        "entries never became visible in the mounted workspace"
+    );
+
+    let initial_status = status_json(&fixture);
+    assert_eq!(initial_status["mounted"].as_bool(), Some(true));
+    assert_eq!(initial_status["entries"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        mounted_entry_names(&fixture)?,
+        vec!["docs".to_owned(), "notes".to_owned()]
+    );
+
+    fs::write(fixture.notes_target.join("beta.txt"), "beta-v2")?;
+    assert!(
+        wait_for_mounted_file_contents(&fixture.workspace.join("notes/beta.txt"), "beta-v2"),
+        "notes entry never reflected beta-v2 through the mount"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.workspace.join("notes/beta.txt"))?,
+        "beta-v2"
+    );
+
+    let docs_mounted = fixture.workspace.join("docs/alpha.txt");
+    assert!(
+        wait_for_mounted_file_contents(&docs_mounted, "alpha-v1"),
+        "docs entry never became readable through the mount"
+    );
+    let mut open_handle = OpenOptions::new().read(true).open(&docs_mounted)?;
+
+    let rm = run(
+        &["rm", "docs", "--workspace", &fixture.workspace_arg()],
+        &fixture.envs(),
+    );
+    assert!(rm.status.success(), "{}", output_text(&rm));
+
+    assert!(
+        wait_for(Duration::from_secs(5), || mounted_entry_names(&fixture)
+            .map(|names| names == vec!["notes".to_owned()])
+            .unwrap_or(false)),
+        "removed entry never disappeared from the mounted workspace"
+    );
+    assert!(
+        wait_for(Duration::from_secs(5), || {
+            fs::metadata(&docs_mounted).is_err()
+        }),
+        "removed entry remained visible to new lookups"
+    );
+
+    let after_rm_status = status_json(&fixture);
+    assert_eq!(after_rm_status["mounted"].as_bool(), Some(true));
+    assert_eq!(after_rm_status["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(mounted_entry_names(&fixture)?, vec!["notes".to_owned()]);
+
+    let mut removed_entry_contents = String::new();
+    open_handle.read_to_string(&mut removed_entry_contents)?;
+    assert_eq!(removed_entry_contents, "alpha-v1");
+    drop(open_handle);
+
+    fs::write(fixture.notes_target.join("beta.txt"), "beta-v3")?;
+    assert!(
+        wait_for_mounted_file_contents(&fixture.workspace.join("notes/beta.txt"), "beta-v3"),
+        "remaining notes entry never reflected beta-v3 after revocation"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.workspace.join("notes/beta.txt"))?,
+        "beta-v3"
+    );
+
+    let stop = run(
+        &["stop", "--workspace", &fixture.workspace_arg()],
+        &fixture.envs(),
+    );
+    assert!(stop.status.success(), "{}", output_text(&stop));
+    wait_for_mounted_state(&fixture, false);
+    assert_eq!(status_json(&fixture)["mounted"].as_bool(), Some(false));
+
+    Ok(())
+}
+
+#[test]
+#[ignore]
+fn fuse_e2e_restart_after_stop_covers_state_recovery_and_remounting() -> Result<(), Box<dyn Error>>
+{
+    require_fuse_prerequisites();
+
+    let fixture = Fixture::new();
+    fs::write(fixture.docs_target.join("recovery.txt"), "recovery-state")?;
+
+    start_workspace(&fixture);
+
+    let add = run(
+        &[
+            "add",
+            &fixture.docs_target_arg(),
+            "docs",
+            "--workspace",
+            &fixture.workspace_arg(),
+            "--rw",
+        ],
+        &fixture.envs(),
+    );
+    assert!(add.status.success(), "{}", output_text(&add));
+    assert_eq!(mounted_entry_names(&fixture)?, vec!["docs".to_owned()]);
+    assert_eq!(
+        fs::read_to_string(fixture.workspace.join("docs/recovery.txt"))?,
+        "recovery-state"
+    );
+
+    let stop = run(
+        &["stop", "--workspace", &fixture.workspace_arg()],
+        &fixture.envs(),
+    );
+    assert!(stop.status.success(), "{}", output_text(&stop));
+    wait_for_mounted_state(&fixture, false);
+    assert_eq!(status_json(&fixture)["mounted"].as_bool(), Some(false));
+
+    start_workspace(&fixture);
+    assert_eq!(status_json(&fixture)["mounted"].as_bool(), Some(true));
+    assert_eq!(mounted_entry_names(&fixture)?, vec!["docs".to_owned()]);
+    assert_eq!(
+        fs::read_to_string(fixture.workspace.join("docs/recovery.txt"))?,
+        "recovery-state"
+    );
+
+    let stop = run(
+        &["stop", "--workspace", &fixture.workspace_arg()],
+        &fixture.envs(),
+    );
+    assert!(stop.status.success(), "{}", output_text(&stop));
+    wait_for_mounted_state(&fixture, false);
+
+    Ok(())
+}
+
+#[test]
+#[ignore]
+fn fuse_e2e_directory_lifecycle_covers_nested_mkdir_rmdir_and_traversal()
+-> Result<(), Box<dyn Error>> {
+    require_fuse_prerequisites();
+
+    let fixture = Fixture::new();
+    start_rw_workspace(&fixture);
+
+    let projects = fixture.workspace.join("docs/projects");
+    let alpha = projects.join("alpha");
+    let notes = alpha.join("notes");
+
+    fs::create_dir(&projects)?;
+    fs::create_dir(&alpha)?;
+    fs::create_dir(&notes)?;
+    fs::write(notes.join("summary.txt"), "directory lifecycle")?;
+
+    assert_eq!(
+        fs::read_to_string(fixture.docs_target.join("projects/alpha/notes/summary.txt"))?,
+        "directory lifecycle"
+    );
+    assert_eq!(
+        fs::read_to_string(
+            fixture
+                .workspace
+                .join("docs/projects/alpha/notes/summary.txt")
+        )?,
+        "directory lifecycle"
+    );
+
+    let non_empty_rmdir = fs::remove_dir(&alpha);
+    assert!(
+        non_empty_rmdir.is_err(),
+        "rmdir unexpectedly succeeded on a non-empty directory"
+    );
+
+    fs::remove_file(notes.join("summary.txt"))?;
+    fs::remove_dir(&notes)?;
+    fs::remove_dir(&alpha)?;
+    fs::remove_dir(&projects)?;
+
+    assert!(!fixture.docs_target.join("projects").exists());
+    assert!(!fixture.workspace.join("docs/projects").exists());
+
+    let stop = run(
+        &["stop", "--workspace", &fixture.workspace_arg()],
+        &fixture.envs(),
+    );
+    assert!(stop.status.success(), "{}", output_text(&stop));
+    wait_for_mounted_state(&fixture, false);
+
+    Ok(())
+}
+
+#[test]
+#[ignore]
+fn fuse_e2e_file_lifecycle_covers_create_append_overwrite_truncate_and_fsync()
+-> Result<(), Box<dyn Error>> {
+    require_fuse_prerequisites();
+
+    let fixture = Fixture::new();
+    start_rw_workspace(&fixture);
+
+    let mounted = fixture.workspace.join("docs/lifecycle.txt");
+    let host = fixture.docs_target.join("lifecycle.txt");
+
+    {
+        let mut file = File::create(&mounted)?;
+        file.write_all(b"alpha")?;
+        file.sync_all()?;
+    }
+    assert_eq!(fs::read_to_string(&host)?, "alpha");
+    assert_eq!(fs::read_to_string(&mounted)?, "alpha");
+
+    {
+        let mut file = OpenOptions::new().append(true).open(&mounted)?;
+        file.write_all(b"-beta")?;
+        file.sync_all()?;
+    }
+    assert_eq!(fs::read_to_string(&host)?, "alpha-beta");
+
+    {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&mounted)?;
+        file.write_all(b"gamma")?;
+        file.sync_all()?;
+    }
+    assert_eq!(fs::read_to_string(&mounted)?, "gamma");
+    assert_eq!(fs::read_to_string(&host)?, "gamma");
+
+    {
+        let file = OpenOptions::new().write(true).open(&mounted)?;
+        file.set_len(0)?;
+        file.sync_all()?;
+    }
+    assert_eq!(fs::read_to_string(&mounted)?, "");
+    assert_eq!(fs::read_to_string(&host)?, "");
+
+    {
+        let mut file = File::create(&mounted)?;
+        file.write_all(b"delta!")?;
+        file.sync_all()?;
+    }
+    assert_eq!(fs::read_to_string(&mounted)?, "delta!");
+
+    {
+        let file = OpenOptions::new().write(true).open(&mounted)?;
+        file.set_len(3)?;
+        file.sync_all()?;
+    }
+    assert_eq!(fs::read_to_string(&mounted)?, "del");
+    assert_eq!(fs::read_to_string(&host)?, "del");
+
+    let stop = run(
+        &["stop", "--workspace", &fixture.workspace_arg()],
+        &fixture.envs(),
+    );
+    assert!(stop.status.success(), "{}", output_text(&stop));
+    wait_for_mounted_state(&fixture, false);
+
+    Ok(())
+}
+
+#[test]
+#[ignore]
+fn fuse_e2e_rejects_ro_writes_and_cross_entry_rename() -> Result<(), Box<dyn Error>> {
+    require_fuse_prerequisites();
+
+    let fixture = Fixture::new();
+    fs::write(fixture.docs_target.join("alpha.txt"), "alpha")?;
+    fs::write(fixture.notes_target.join("blocked.txt"), "blocked")?;
+
+    let start = run(
+        &["start", &fixture.workspace_arg(), "--bg"],
+        &fixture.envs(),
+    );
+    assert!(start.status.success(), "{}", output_text(&start));
+    wait_for_mounted_state(&fixture, true);
+
+    let add_docs = run(
+        &[
+            "add",
+            &fixture.docs_target_arg(),
+            "docs",
+            "--workspace",
+            &fixture.workspace_arg(),
+            "--rw",
+        ],
+        &fixture.envs(),
+    );
+    assert!(add_docs.status.success(), "{}", output_text(&add_docs));
+
+    let add_notes = run(
+        &[
+            "add",
+            &fixture.notes_target_arg(),
+            "notes",
+            "--workspace",
+            &fixture.workspace_arg(),
+            "--ro",
+        ],
+        &fixture.envs(),
+    );
+    assert!(add_notes.status.success(), "{}", output_text(&add_notes));
+
+    let ro_write = fs::write(fixture.workspace.join("notes/rejected.txt"), "nope");
+    assert!(
+        ro_write.is_err(),
+        "write unexpectedly succeeded on a read-only entry"
+    );
+
+    let cross_entry_rename = fs::rename(
+        fixture.workspace.join("docs/alpha.txt"),
+        fixture.workspace.join("notes/moved.txt"),
+    );
+    assert!(
+        cross_entry_rename.is_err(),
+        "cross-entry rename unexpectedly succeeded"
+    );
+
+    let stop = run(
+        &["stop", "--workspace", &fixture.workspace_arg()],
+        &fixture.envs(),
+    );
+    assert!(stop.status.success(), "{}", output_text(&stop));
+    wait_for_mounted_state(&fixture, false);
+
+    Ok(())
+}
