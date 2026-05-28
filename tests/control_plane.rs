@@ -194,7 +194,9 @@ fn start_leaves_workspace_empty_before_entries_are_added() -> Result<(), Box<dyn
         return Ok(());
     }
     if !command_in_path("fusermount3") {
-        eprintln!("skipping workspace-emptiness regression test because fusermount3 is unavailable");
+        eprintln!(
+            "skipping workspace-emptiness regression test because fusermount3 is unavailable"
+        );
         return Ok(());
     }
 

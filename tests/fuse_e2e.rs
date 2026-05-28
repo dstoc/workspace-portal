@@ -728,6 +728,94 @@ fn fuse_e2e_file_lifecycle_covers_create_append_overwrite_truncate_and_fsync()
 
 #[test]
 #[ignore]
+fn fuse_e2e_hard_link_and_copy_cover_rustc_style_file_duplication() -> Result<(), Box<dyn Error>> {
+    require_fuse_prerequisites();
+
+    let fixture = Fixture::new();
+    start_rw_workspace(&fixture);
+
+    let mounted_source = fixture.workspace.join("docs/source.bin");
+    let mounted_link = fixture.workspace.join("docs/source-link.bin");
+    let mounted_copy = fixture.workspace.join("docs/source-copy.bin");
+
+    fs::write(&mounted_source, "alpha-beta-gamma")?;
+
+    fs::hard_link(&mounted_source, &mounted_link)?;
+    assert_eq!(fs::read_to_string(&mounted_link)?, "alpha-beta-gamma");
+
+    fs::write(&mounted_link, "hard-link-updated")?;
+    assert_eq!(fs::read_to_string(&mounted_source)?, "hard-link-updated");
+    assert_eq!(
+        fs::read_to_string(fixture.docs_target.join("source.bin"))?,
+        "hard-link-updated"
+    );
+
+    fs::copy(&mounted_source, &mounted_copy)?;
+    assert_eq!(fs::read_to_string(&mounted_copy)?, "hard-link-updated");
+    assert_eq!(
+        fs::read_to_string(fixture.docs_target.join("source-copy.bin"))?,
+        "hard-link-updated"
+    );
+
+    let stop = run(
+        &["stop", "--workspace", &fixture.workspace_arg()],
+        &fixture.envs(),
+    );
+    assert!(stop.status.success(), "{}", output_text(&stop));
+    wait_for_mounted_state(&fixture, false);
+
+    Ok(())
+}
+
+#[test]
+#[ignore]
+fn fuse_e2e_rename_destination_is_immediately_openable() -> Result<(), Box<dyn Error>> {
+    require_fuse_prerequisites();
+
+    let fixture = Fixture::new();
+    start_rw_workspace(&fixture);
+
+    let mounted_dir = fixture.workspace.join("docs/target/fs-race");
+    fs::create_dir_all(&mounted_dir)?;
+
+    for i in 1..=1000 {
+        let tmp_dir = mounted_dir.join(format!("rmeta{i:04}"));
+        let full = tmp_dir.join("full.rmeta");
+        let destination = mounted_dir.join(format!("libtest-{i}.rmeta"));
+
+        fs::create_dir(&tmp_dir)?;
+        fs::write(&full, "abc")?;
+        fs::rename(&full, &destination)?;
+
+        let immediate_read = fs::read_to_string(&destination);
+        if let Err(err) = immediate_read {
+            eprintln!("failed at iteration {i}: {err}");
+            eprintln!("directory listing after failure:");
+            for entry in fs::read_dir(&mounted_dir)? {
+                eprintln!("  {}", entry?.path().display());
+            }
+            let _ = fs::metadata(&destination).map(|meta| {
+                eprintln!("destination inode={} size={}", meta.len(), meta.len());
+            });
+            return Err(Box::new(err));
+        }
+
+        fs::remove_file(&destination)?;
+        fs::remove_dir(&tmp_dir)?;
+    }
+
+    let stop = run(
+        &["stop", "--workspace", &fixture.workspace_arg()],
+        &fixture.envs(),
+    );
+    assert!(stop.status.success(), "{}", output_text(&stop));
+    wait_for_mounted_state(&fixture, false);
+
+    Ok(())
+}
+
+#[test]
+#[ignore]
 fn fuse_e2e_rejects_ro_writes_and_cross_entry_rename() -> Result<(), Box<dyn Error>> {
     require_fuse_prerequisites();
 

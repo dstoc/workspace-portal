@@ -1,4 +1,8 @@
-use std::{env, os::unix::ffi::OsStrExt, path::{Component, Path, PathBuf}};
+use std::{
+    env,
+    os::unix::ffi::OsStrExt,
+    path::{Component, Path, PathBuf},
+};
 
 use nix::unistd::Uid;
 
@@ -121,7 +125,10 @@ pub fn socket_path(workspace_id: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, sync::atomic::{AtomicUsize, Ordering}};
+    use std::{
+        fs,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 

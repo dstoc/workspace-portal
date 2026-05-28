@@ -47,13 +47,19 @@ pub struct StartCommand {
     #[arg(long, help = "Enable the FUSE allow_other mount option")]
     pub allow_other: bool,
 
-    #[arg(long = "no-allow-other", help = "Disable the FUSE allow_other mount option")]
+    #[arg(
+        long = "no-allow-other",
+        help = "Disable the FUSE allow_other mount option"
+    )]
     pub no_allow_other: bool,
 
     #[arg(long = "read-only", help = "Mount the workspace read-only by default")]
     pub read_only: bool,
 
-    #[arg(long, help = "Adopt an existing workspace directory instead of requiring it to be empty")]
+    #[arg(
+        long,
+        help = "Adopt an existing workspace directory instead of requiring it to be empty"
+    )]
     pub adopt: bool,
 
     #[arg(long, help = "Override stale state or existing mount conditions")]
@@ -62,7 +68,11 @@ pub struct StartCommand {
     #[arg(long = "log-level", help = "Set the daemon log level")]
     pub log_level: Option<String>,
 
-    #[arg(long, hide = true, help = "Internal flag used when spawning the daemon child process")]
+    #[arg(
+        long,
+        hide = true,
+        help = "Internal flag used when spawning the daemon child process"
+    )]
     pub daemon_child: bool,
 }
 
@@ -73,7 +83,10 @@ pub struct AddCommand {
     /// Top-level workspace entry name to create.
     pub mount_point: String,
 
-    #[arg(long, help = "Override workspace discovery with an explicit workspace path")]
+    #[arg(
+        long,
+        help = "Override workspace discovery with an explicit workspace path"
+    )]
     pub workspace: Option<PathBuf>,
 
     #[arg(long, help = "Add the entry as read-only")]
@@ -85,10 +98,16 @@ pub struct AddCommand {
     #[arg(long, help = "Replace an existing entry with the same name")]
     pub replace: bool,
 
-    #[arg(long = "follow-symlinks", help = "Resolve symlink targets before adding the entry")]
+    #[arg(
+        long = "follow-symlinks",
+        help = "Resolve symlink targets before adding the entry"
+    )]
     pub follow_symlinks: bool,
 
-    #[arg(long = "no-follow-symlinks", help = "Preserve symlinks instead of resolving them")]
+    #[arg(
+        long = "no-follow-symlinks",
+        help = "Preserve symlinks instead of resolving them"
+    )]
     pub no_follow_symlinks: bool,
 
     #[arg(long, help = "Deprecated alias for the mount-point name")]
@@ -100,7 +119,10 @@ pub struct RmCommand {
     /// Top-level workspace entry name to remove.
     pub mount_point: String,
 
-    #[arg(long, help = "Override workspace discovery with an explicit workspace path")]
+    #[arg(
+        long,
+        help = "Override workspace discovery with an explicit workspace path"
+    )]
     pub workspace: Option<PathBuf>,
 
     #[arg(long, help = "Request hard revocation semantics where supported")]
@@ -112,16 +134,25 @@ pub struct RmCommand {
 
 #[derive(Debug, Parser)]
 pub struct StatusCommand {
-    #[arg(long, help = "Override workspace discovery with an explicit workspace path")]
+    #[arg(
+        long,
+        help = "Override workspace discovery with an explicit workspace path"
+    )]
     pub workspace: Option<PathBuf>,
 
-    #[arg(long, help = "Print machine-readable JSON instead of human-readable text")]
+    #[arg(
+        long,
+        help = "Print machine-readable JSON instead of human-readable text"
+    )]
     pub json: bool,
 }
 
 #[derive(Debug, Parser)]
 pub struct StopCommand {
-    #[arg(long, help = "Override workspace discovery with an explicit workspace path")]
+    #[arg(
+        long,
+        help = "Override workspace discovery with an explicit workspace path"
+    )]
     pub workspace: Option<PathBuf>,
 
     #[arg(long, help = "Use lazy unmount when stopping the workspace")]
@@ -133,7 +164,10 @@ pub struct StopCommand {
 
 #[derive(Debug, Parser)]
 pub struct CheckCommand {
-    #[arg(long, help = "Override workspace discovery with an explicit workspace path")]
+    #[arg(
+        long,
+        help = "Override workspace discovery with an explicit workspace path"
+    )]
     pub workspace: Option<PathBuf>,
 }
 

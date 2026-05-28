@@ -20,6 +20,7 @@ pub(crate) enum OpenHandleKind {
 
 #[derive(Debug)]
 pub(crate) struct OpenHandle {
+    pub(crate) ino: INodeNo,
     pub(crate) file: File,
     pub(crate) kind: OpenHandleKind,
     pub(crate) writable: bool,
@@ -97,8 +98,48 @@ impl FuseRuntime {
         self.inode_for_path(path)
     }
 
+    pub(crate) fn forget_inode(&mut self, ino: INodeNo) {
+        if ino == ROOT_INO {
+            return;
+        }
+        if let Some(path) = self.inode_paths.remove(&ino.0) {
+            self.path_inodes.remove(&path);
+        }
+    }
+
+    pub(crate) fn rename_cached_subtree(&mut self, source: &PortalPath, destination: &PortalPath) {
+        let mut stale_destination_paths = Vec::new();
+        let mut renamed = Vec::new();
+
+        for (ino, path) in &self.inode_paths {
+            if *ino == ROOT_INO.0 {
+                continue;
+            }
+
+            if path_has_prefix(path, destination) {
+                stale_destination_paths.push((*ino, path.clone()));
+            }
+            if path_has_prefix(path, source) {
+                renamed.push((*ino, replace_prefix(path, source, destination)));
+            }
+        }
+
+        for (ino, old_path) in stale_destination_paths {
+            self.inode_paths.remove(&ino);
+            self.path_inodes.remove(&old_path);
+        }
+
+        for (ino, new_path) in renamed {
+            if let Some(old_path) = self.inode_paths.insert(ino, new_path.clone()) {
+                self.path_inodes.remove(&old_path);
+            }
+            self.path_inodes.insert(new_path, ino);
+        }
+    }
+
     pub(crate) fn handle_file(
         &mut self,
+        ino: INodeNo,
         file: File,
         kind: OpenHandleKind,
         writable: bool,
@@ -108,12 +149,22 @@ impl FuseRuntime {
         self.handles.insert(
             fh,
             OpenHandle {
+                ino,
                 file,
                 kind,
                 writable,
             },
         );
         FileHandle(fh)
+    }
+
+    /// Returns metadata from any open handle for `ino`. Used by `getattr` to serve
+    /// attributes for soft-revoked entries that still have open file descriptors.
+    pub(crate) fn open_handle_metadata(&self, ino: INodeNo) -> Option<std::fs::Metadata> {
+        self.handles
+            .values()
+            .find(|h| h.ino == ino)
+            .and_then(|h| h.file.metadata().ok())
     }
 
     pub(crate) fn resolve_parent_child(
@@ -156,5 +207,92 @@ pub(crate) fn entry_inode(name: &str) -> INodeNo {
         INodeNo(ROOT_INO.0 + 1)
     } else {
         INodeNo(ino)
+    }
+}
+
+fn path_has_prefix(path: &PortalPath, prefix: &PortalPath) -> bool {
+    match (path, prefix) {
+        (_, PortalPath::Root) => true,
+        (
+            PortalPath::Entry {
+                name: path_name,
+                relative: path_relative,
+            },
+            PortalPath::Entry {
+                name: prefix_name,
+                relative: prefix_relative,
+            },
+        ) => path_name == prefix_name && path_relative.starts_with(prefix_relative),
+        _ => false,
+    }
+}
+
+fn replace_prefix(path: &PortalPath, source: &PortalPath, destination: &PortalPath) -> PortalPath {
+    match (path, source, destination) {
+        (
+            PortalPath::Entry {
+                name: path_name,
+                relative: path_relative,
+            },
+            PortalPath::Entry {
+                name: source_name,
+                relative: source_relative,
+            },
+            PortalPath::Entry {
+                name: destination_name,
+                relative: destination_relative,
+            },
+        ) if path_name == source_name && path_relative.starts_with(source_relative) => {
+            let suffix = path_relative
+                .strip_prefix(source_relative)
+                .expect("prefix already checked");
+            let mut relative = destination_relative.clone();
+            relative.push(suffix);
+            PortalPath::Entry {
+                name: destination_name.clone(),
+                relative,
+            }
+        }
+        _ => path.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    #[test]
+    fn rename_cached_subtree_preserves_inodes_and_moves_descendants() {
+        let mut runtime = FuseRuntime::new();
+        let source = PortalPath::Entry {
+            name: "docs".to_owned(),
+            relative: PathBuf::from("old"),
+        };
+        let child = PortalPath::Entry {
+            name: "docs".to_owned(),
+            relative: PathBuf::from("old/nested/file.txt"),
+        };
+        let destination = PortalPath::Entry {
+            name: "docs".to_owned(),
+            relative: PathBuf::from("new"),
+        };
+
+        let source_ino = runtime.cache_portal_path(source.clone());
+        let child_ino = runtime.cache_portal_path(child.clone());
+
+        runtime.rename_cached_subtree(&source, &destination);
+
+        assert_eq!(runtime.path_inodes.get(&source), None);
+        assert_eq!(runtime.path_inodes.get(&child), None);
+        assert_eq!(runtime.inode_paths.get(&source_ino.0), Some(&destination));
+        assert_eq!(
+            runtime.inode_paths.get(&child_ino.0),
+            Some(&PortalPath::Entry {
+                name: "docs".to_owned(),
+                relative: PathBuf::from("new/nested/file.txt"),
+            })
+        );
     }
 }

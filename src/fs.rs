@@ -22,7 +22,9 @@ pub use path::{PortalPath, RenamePlan, ResolvedPortalPath, parse_portal_path};
 pub use resolve::{resolve_read_path, resolve_write_path, validate_rename};
 
 pub(crate) const ROOT_INO: INodeNo = INodeNo::ROOT;
-pub(crate) const TTL: Duration = Duration::from_secs(1);
+// Use zero TTLs until we implement explicit invalidation on namespace changes.
+// This avoids stale positive and negative dentries surviving successful renames.
+pub(crate) const TTL: Duration = Duration::from_secs(0);
 
 #[derive(Debug, Clone)]
 pub struct FsConfig {
