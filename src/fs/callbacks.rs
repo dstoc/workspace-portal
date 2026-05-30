@@ -1,7 +1,7 @@
 use std::{
     cmp,
     fs::{self, OpenOptions},
-    os::unix::fs::{FileExt, OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{symlink, FileExt, OpenOptionsExt, PermissionsExt},
     time::SystemTime,
 };
 
@@ -644,6 +644,50 @@ impl Filesystem for PortalFs {
                     reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO)));
                     return;
                 }
+                let metadata = match fs::symlink_metadata(&resolved.target) {
+                    Ok(metadata) => metadata,
+                    Err(err) => {
+                        reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO)));
+                        return;
+                    }
+                };
+                let ino = runtime.cache_portal_path(path);
+                let attr = attr_from_metadata(
+                    ino,
+                    &metadata,
+                    entry_is_read_only(&resolved.entry, state.read_only_default),
+                    0,
+                );
+                reply.entry(&TTL, &attr, Generation(resolved.entry.generation));
+            }
+            Err(err) => reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO))),
+        }
+    }
+
+    fn symlink(
+        &self,
+        _req: &Request,
+        parent: INodeNo,
+        link_name: &std::ffi::OsStr,
+        target: &std::path::Path,
+        reply: ReplyEntry,
+    ) {
+        let state = self.state.read().unwrap().clone();
+        if parent == ROOT_INO {
+            reply.error(Errno::EPERM);
+            return;
+        }
+
+        let mut runtime = self.runtime.lock().unwrap();
+        let name = link_name.to_os_string();
+        let Ok((path, resolved)) = runtime.resolve_parent_child_writable(&state, parent, &name)
+        else {
+            reply.error(Errno::EACCES);
+            return;
+        };
+
+        match symlink(target, &resolved.target) {
+            Ok(()) => {
                 let metadata = match fs::symlink_metadata(&resolved.target) {
                     Ok(metadata) => metadata,
                     Err(err) => {

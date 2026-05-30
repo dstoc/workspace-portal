@@ -880,3 +880,68 @@ fn fuse_e2e_rejects_ro_writes_and_cross_entry_rename() -> Result<(), Box<dyn Err
 
     Ok(())
 }
+
+#[test]
+#[ignore]
+#[cfg(unix)]
+fn fuse_e2e_symlink_creation() -> Result<(), Box<dyn Error>> {
+    require_fuse_prerequisites();
+
+    let fixture = Fixture::new();
+    start_rw_workspace(&fixture);
+
+    // Add notes as ro
+    let add_notes = run(
+        &[
+            "add",
+            &fixture.notes_target_arg(),
+            "notes",
+            "--workspace",
+            &fixture.workspace_arg(),
+            "--ro",
+        ],
+        &fixture.envs(),
+    );
+    assert!(add_notes.status.success(), "{}", output_text(&add_notes));
+
+    // Step 2 & 3: create symlink in rw entry
+    let link_path = fixture.workspace.join("docs/my-link");
+    symlink("./target", &link_path)?;
+    assert!(fs::symlink_metadata(&link_path)?.file_type().is_symlink());
+    assert_eq!(
+        fs::read_link(&link_path)?,
+        std::path::PathBuf::from("./target")
+    );
+
+    // The symlink must also be visible on the host
+    assert!(
+        fs::symlink_metadata(fixture.docs_target.join("my-link"))?
+            .file_type()
+            .is_symlink()
+    );
+
+    // Step 4: symlink creation in ro entry must fail
+    let ro_link = fixture.workspace.join("notes/blocked-link");
+    let ro_result = symlink("./x", &ro_link);
+    assert!(
+        ro_result.is_err(),
+        "symlink creation in ro entry should have failed"
+    );
+
+    // Step 5: symlink creation at workspace root must fail
+    let root_link = fixture.workspace.join("root-link");
+    let root_result = symlink("./x", &root_link);
+    assert!(
+        root_result.is_err(),
+        "symlink creation at workspace root should have failed"
+    );
+
+    let stop = run(
+        &["stop", "--workspace", &fixture.workspace_arg()],
+        &fixture.envs(),
+    );
+    assert!(stop.status.success(), "{}", output_text(&stop));
+    wait_for_mounted_state(&fixture, false);
+
+    Ok(())
+}
