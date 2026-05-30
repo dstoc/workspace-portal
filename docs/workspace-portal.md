@@ -536,3 +536,10 @@ Useful next extensions that are not implemented today:
 - multi-process concurrency tests
 - stronger path confinement using `openat`/`openat2`-style resolution
 - CI execution of the Podman FUSE E2E harness
+- extended-attribute support: `getxattr` currently returns `ENODATA` and
+  `setxattr`/`listxattr`/`removexattr` are unimplemented, so `cp -a`, SELinux
+  labeling, and file capabilities silently lose xattrs
+- I/O hot-path efficiency: `write`/`lookup`/`getattr` clone the full
+  `PortalState` per call and `readdir` re-reads and re-stats the whole directory
+  on every invocation (O(n²) for large directories); correct for typical sizes
+  but worth profiling before large-repo use
