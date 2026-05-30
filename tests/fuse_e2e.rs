@@ -945,3 +945,38 @@ fn fuse_e2e_symlink_creation() -> Result<(), Box<dyn Error>> {
 
     Ok(())
 }
+
+#[test]
+#[ignore]
+fn fuse_e2e_statfs_reports_backing_capacity() -> Result<(), Box<dyn Error>> {
+    require_fuse_prerequisites();
+
+    let fixture = Fixture::new();
+    start_rw_workspace(&fixture);
+
+    let entry_path = fixture.workspace.join("docs");
+    assert!(entry_path.exists(), "docs entry should be visible in the mount");
+
+    // -P = POSIX output (stable columns), -k = 1K blocks. Columns:
+    // Filesystem  1024-blocks  Used  Available  Capacity  Mounted-on
+    let out = std::process::Command::new("df")
+        .arg("-Pk")
+        .arg(&entry_path)
+        .output()?;
+    assert!(
+        out.status.success(),
+        "df failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let data_line = stdout.lines().nth(1).expect("df should print a data row");
+    let cols: Vec<&str> = data_line.split_whitespace().collect();
+    // Available is the 4th column (index 3) in POSIX `df -P` output.
+    let available: u64 = cols[3].parse().expect("available blocks should be numeric");
+    assert!(
+        available > 0,
+        "statfs should report nonzero available blocks, got df line: {data_line}"
+    );
+
+    Ok(())
+}

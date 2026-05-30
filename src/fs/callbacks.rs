@@ -1,7 +1,9 @@
 use std::{
     cmp,
+    ffi::CString,
     fs::{self, OpenOptions},
-    os::unix::fs::{symlink, FileExt, OpenOptionsExt, PermissionsExt},
+    os::unix::{ffi::OsStrExt, fs::{symlink, FileExt, OpenOptionsExt, PermissionsExt}},
+    path::Path,
     time::SystemTime,
 };
 
@@ -1271,8 +1273,50 @@ impl Filesystem for PortalFs {
         reply.poll(ready);
     }
 
-    fn statfs(&self, _req: &Request, _ino: INodeNo, reply: ReplyStatfs) {
-        let state = self.state.read().unwrap();
-        reply.statfs(state.entries.len() as u64 + 1, 0, 0, 0, 0, 4096, 255, 0);
+    fn statfs(&self, _req: &Request, ino: INodeNo, reply: ReplyStatfs) {
+        let state = self.state.read().unwrap().clone();
+
+        // Resolve the path to measure: root inode → workspace dir, else → entry target.
+        let measure_path: std::path::PathBuf = if ino == ROOT_INO {
+            state.workspace.clone()
+        } else {
+            let mut runtime = self.runtime.lock().unwrap();
+            let maybe_path = runtime.path_for_inode(&state, ino);
+            match maybe_path.and_then(|p| state_for_path(&state, &p).ok()) {
+                Some(resolved) => resolved.target.clone(),
+                None => state.workspace.clone(),
+            }
+        };
+
+        // Try the resolved path, then fall back to workspace, then use hardcoded values.
+        let buf = statvfs_for(&measure_path)
+            .or_else(|| statvfs_for(&state.workspace));
+
+        match buf {
+            Some(buf) => {
+                let namelen = if buf.f_namemax == 0 { 255 } else { buf.f_namemax as u32 };
+                reply.statfs(
+                    buf.f_blocks as u64,
+                    buf.f_bfree as u64,
+                    buf.f_bavail as u64,
+                    buf.f_files as u64,
+                    buf.f_ffree as u64,
+                    buf.f_bsize as u32,
+                    namelen,
+                    buf.f_frsize as u32,
+                );
+            }
+            None => {
+                reply.statfs(state.entries.len() as u64 + 1, 0, 0, 0, 0, 4096, 255, 0);
+            }
+        }
     }
+}
+
+fn statvfs_for(path: &Path) -> Option<libc::statvfs> {
+    let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: zeroed libc::statvfs is a valid initial value for the out-param.
+    let mut buf: libc::statvfs = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::statvfs(c_path.as_ptr(), &mut buf) };
+    if rc == 0 { Some(buf) } else { None }
 }
