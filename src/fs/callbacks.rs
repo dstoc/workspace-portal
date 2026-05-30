@@ -2,7 +2,7 @@ use std::{
     cmp,
     ffi::CString,
     fs::{self, OpenOptions},
-    os::unix::{ffi::OsStrExt, fs::{symlink, FileExt, OpenOptionsExt, PermissionsExt}},
+    os::unix::{ffi::OsStrExt, fs::{symlink, FileExt, OpenOptionsExt, PermissionsExt}, io::AsRawFd},
     path::Path,
     time::SystemTime,
 };
@@ -168,6 +168,42 @@ fn copy_file_range_fallback(
     }
 
     Ok(copied)
+}
+
+fn timeornow_to_timespec(value: Option<TimeOrNow>) -> libc::timespec {
+    match value {
+        None => libc::timespec {
+            tv_sec: 0,
+            tv_nsec: libc::UTIME_OMIT,
+        },
+        Some(TimeOrNow::Now) => libc::timespec {
+            tv_sec: 0,
+            tv_nsec: libc::UTIME_NOW,
+        },
+        Some(TimeOrNow::SpecificTime(t)) => {
+            match t.duration_since(SystemTime::UNIX_EPOCH) {
+                Ok(d) => libc::timespec {
+                    tv_sec: d.as_secs() as libc::time_t,
+                    tv_nsec: d.subsec_nanos() as _,
+                },
+                Err(e) => {
+                    // Time is before the Unix epoch.
+                    let d = e.duration();
+                    let nanos = d.subsec_nanos();
+                    let mut tv_sec = -(d.as_secs() as libc::time_t);
+                    let tv_nsec: libc::c_long;
+                    if nanos == 0 {
+                        tv_nsec = 0;
+                    } else {
+                        // Borrow 1 second so tv_nsec stays positive.
+                        tv_sec -= 1;
+                        tv_nsec = (1_000_000_000 - nanos) as libc::c_long;
+                    }
+                    libc::timespec { tv_sec, tv_nsec }
+                }
+            }
+        }
+    }
 }
 
 impl Filesystem for PortalFs {
@@ -351,8 +387,8 @@ impl Filesystem for PortalFs {
         uid: Option<u32>,
         gid: Option<u32>,
         size: Option<u64>,
-        _atime: Option<TimeOrNow>,
-        _mtime: Option<TimeOrNow>,
+        atime: Option<TimeOrNow>,
+        mtime: Option<TimeOrNow>,
         _ctime: Option<SystemTime>,
         fh: Option<FileHandle>,
         _crtime: Option<SystemTime>,
@@ -415,6 +451,52 @@ impl Filesystem for PortalFs {
             };
             if let Err(err) = result {
                 reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO)));
+                return;
+            }
+        }
+
+        if atime.is_some() || mtime.is_some() {
+            let times: [libc::timespec; 2] = [
+                timeornow_to_timespec(atime),
+                timeornow_to_timespec(mtime),
+            ];
+
+            // Prefer futimens on an open writable handle; fall back to utimensat on path.
+            let use_fd: Option<i32> = fh.and_then(|fh| {
+                runtime.handles.get(&fh.0).and_then(|handle| {
+                    if handle.writable {
+                        Some(handle.file.as_raw_fd())
+                    } else {
+                        None
+                    }
+                })
+            });
+
+            let rc = if let Some(fd) = use_fd {
+                unsafe { libc::futimens(fd, times.as_ptr()) }
+            } else {
+                let cpath = match CString::new(resolved.target.as_os_str().as_bytes()) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        reply.error(Errno::from_i32(libc::EINVAL));
+                        return;
+                    }
+                };
+                unsafe {
+                    libc::utimensat(
+                        libc::AT_FDCWD,
+                        cpath.as_ptr(),
+                        times.as_ptr(),
+                        libc::AT_SYMLINK_NOFOLLOW,
+                    )
+                }
+            };
+
+            if rc == -1 {
+                let errno = std::io::Error::last_os_error()
+                    .raw_os_error()
+                    .unwrap_or(libc::EIO);
+                reply.error(Errno::from_i32(errno));
                 return;
             }
         }

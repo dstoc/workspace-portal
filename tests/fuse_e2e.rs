@@ -980,3 +980,332 @@ fn fuse_e2e_statfs_reports_backing_capacity() -> Result<(), Box<dyn Error>> {
 
     Ok(())
 }
+
+#[test]
+#[ignore]
+fn fuse_e2e_setattr_persists_timestamps() -> Result<(), Box<dyn Error>> {
+    require_fuse_prerequisites();
+
+    // Set up a workspace with a read-write entry ("docs") and a read-only entry ("notes").
+    // The rw entry is backed by fixture.docs_target; the ro entry by fixture.notes_target.
+    let fixture = Fixture::new();
+    fs::write(fixture.docs_target.join("file.txt"), "content")?;
+    fs::write(fixture.notes_target.join("file.txt"), "ro-content")?;
+
+    let start = run(
+        &["start", &fixture.workspace_arg(), "--bg"],
+        &fixture.envs(),
+    );
+    assert!(start.status.success(), "{}", output_text(&start));
+    wait_for_mounted_state(&fixture, true);
+
+    let add_docs = run(
+        &[
+            "add",
+            &fixture.docs_target_arg(),
+            "docs",
+            "--workspace",
+            &fixture.workspace_arg(),
+            "--rw",
+        ],
+        &fixture.envs(),
+    );
+    assert!(add_docs.status.success(), "{}", output_text(&add_docs));
+
+    let add_notes = run(
+        &[
+            "add",
+            &fixture.notes_target_arg(),
+            "notes",
+            "--workspace",
+            &fixture.workspace_arg(),
+            "--ro",
+        ],
+        &fixture.envs(),
+    );
+    assert!(add_notes.status.success(), "{}", output_text(&add_notes));
+
+    let mount_file = fixture.workspace.join("docs/file.txt");
+    let host_file = fixture.docs_target.join("file.txt");
+
+    // -----------------------------------------------------------------------
+    // Step 2: touch -d '2020-01-01T00:00:00' sets mtime to a known past time.
+    // Confirm stat through the mount AND on the host backing path both report
+    // the 2020 mtime.
+    // -----------------------------------------------------------------------
+    let touch_2020 = std::process::Command::new("touch")
+        .args(["-d", "2020-01-01T00:00:00Z", mount_file.to_str().unwrap()])
+        .output()?;
+    assert!(
+        touch_2020.status.success(),
+        "touch -d 2020 failed: {}",
+        String::from_utf8_lossy(&touch_2020.stderr)
+    );
+
+    let expected_2020_mtime = std::time::SystemTime::UNIX_EPOCH
+        + std::time::Duration::from_secs(1577836800); // 2020-01-01T00:00:00 UTC
+
+    let mount_mtime_2020 = fs::metadata(&mount_file)?.modified()?;
+    assert!(
+        mount_mtime_2020
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            == expected_2020_mtime
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        "step 2: mount mtime should be 2020-01-01; got {:?}",
+        mount_mtime_2020
+    );
+    let host_mtime_2020 = fs::metadata(&host_file)?.modified()?;
+    assert!(
+        host_mtime_2020
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            == expected_2020_mtime
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        "step 2: host mtime should be 2020-01-01; got {:?}",
+        host_mtime_2020
+    );
+
+    // -----------------------------------------------------------------------
+    // Step 3: touch -a -d '2021-02-02' sets only atime (UTIME_OMIT for mtime).
+    // Confirm atime changed and mtime did NOT change.
+    // -----------------------------------------------------------------------
+    let mtime_before_atime_only = fs::metadata(&mount_file)?.modified()?;
+
+    let touch_atime = std::process::Command::new("touch")
+        .args([
+            "-a",
+            "-d",
+            "2021-02-02T00:00:00Z",
+            mount_file.to_str().unwrap(),
+        ])
+        .output()?;
+    assert!(
+        touch_atime.status.success(),
+        "touch -a -d 2021 failed: {}",
+        String::from_utf8_lossy(&touch_atime.stderr)
+    );
+
+    // atime should now reflect 2021-02-02
+    let expected_2021_atime_secs = 1612224000u64; // 2021-02-02T00:00:00 UTC
+    let mount_atime_2021 = fs::metadata(&mount_file)?.accessed()?;
+    assert!(
+        mount_atime_2021
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            == expected_2021_atime_secs,
+        "step 3: mount atime should be 2021-02-02; got {:?}",
+        mount_atime_2021
+    );
+
+    // mtime must be unchanged (UTIME_OMIT was honoured)
+    let mtime_after_atime_only = fs::metadata(&mount_file)?.modified()?;
+    assert_eq!(
+        mtime_before_atime_only
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        mtime_after_atime_only
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        "step 3: mtime must not change when only atime is updated (UTIME_OMIT)"
+    );
+
+    // Verify the same on the host backing file
+    let host_atime_2021 = fs::metadata(&host_file)?.accessed()?;
+    assert!(
+        host_atime_2021
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            == expected_2021_atime_secs,
+        "step 3: host atime should be 2021-02-02; got {:?}",
+        host_atime_2021
+    );
+
+    // -----------------------------------------------------------------------
+    // Step 4: cp -p copies mtime from source to destination.
+    // Confirm dst mtime through the mount equals src mtime.
+    // -----------------------------------------------------------------------
+    let src_file = fixture.root.join("src-for-cp.txt");
+    fs::write(&src_file, "cp-source-data")?;
+    // Set src mtime to a known value via touch
+    let touch_src = std::process::Command::new("touch")
+        .args(["-d", "2019-06-15T12:00:00", src_file.to_str().unwrap()])
+        .output()?;
+    assert!(
+        touch_src.status.success(),
+        "touch src for cp -p failed: {}",
+        String::from_utf8_lossy(&touch_src.stderr)
+    );
+    let src_mtime = fs::metadata(&src_file)?.modified()?;
+
+    let mount_dst = fixture.workspace.join("docs/dst-cp.txt");
+    let cp_p = std::process::Command::new("cp")
+        .args(["-p", src_file.to_str().unwrap(), mount_dst.to_str().unwrap()])
+        .output()?;
+    assert!(
+        cp_p.status.success(),
+        "cp -p failed: {}",
+        String::from_utf8_lossy(&cp_p.stderr)
+    );
+
+    let dst_mount_mtime = fs::metadata(&mount_dst)?.modified()?;
+    assert_eq!(
+        src_mtime
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        dst_mount_mtime
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        "step 4: dst mtime through mount should equal src mtime after cp -p"
+    );
+
+    let host_dst = fixture.docs_target.join("dst-cp.txt");
+    let dst_host_mtime = fs::metadata(&host_dst)?.modified()?;
+    assert_eq!(
+        src_mtime
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        dst_host_mtime
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        "step 4: dst mtime on host should equal src mtime after cp -p"
+    );
+
+    // -----------------------------------------------------------------------
+    // Step 5: tar extraction preserves archived mtimes through the mount.
+    // Build a tar containing a file with a known mtime, extract into the
+    // entry, then confirm the restored file keeps its archived mtime.
+    // -----------------------------------------------------------------------
+    let tar_staging = fixture.root.join("tar-staging");
+    fs::create_dir_all(&tar_staging)?;
+    let archived_file = tar_staging.join("archived.txt");
+    fs::write(&archived_file, "archived-data")?;
+    let touch_archived = std::process::Command::new("touch")
+        .args([
+            "-d",
+            "2018-03-10T08:00:00",
+            archived_file.to_str().unwrap(),
+        ])
+        .output()?;
+    assert!(
+        touch_archived.status.success(),
+        "touch archived.txt failed: {}",
+        String::from_utf8_lossy(&touch_archived.stderr)
+    );
+    let archived_mtime = fs::metadata(&archived_file)?.modified()?;
+
+    let tar_path = fixture.root.join("test.tar");
+    let tar_create = std::process::Command::new("tar")
+        .args([
+            "-cf",
+            tar_path.to_str().unwrap(),
+            "-C",
+            tar_staging.to_str().unwrap(),
+            "archived.txt",
+        ])
+        .output()?;
+    assert!(
+        tar_create.status.success(),
+        "tar create failed: {}",
+        String::from_utf8_lossy(&tar_create.stderr)
+    );
+
+    let extract_dir = fixture.workspace.join("docs");
+    let tar_extract = std::process::Command::new("tar")
+        .args([
+            "-xf",
+            tar_path.to_str().unwrap(),
+            "--no-same-owner",
+            "-C",
+            extract_dir.to_str().unwrap(),
+        ])
+        .output()?;
+    assert!(
+        tar_extract.status.success(),
+        "tar extract failed: {}",
+        String::from_utf8_lossy(&tar_extract.stderr)
+    );
+
+    let extracted_mount = fixture.workspace.join("docs/archived.txt");
+    let extracted_mount_mtime = fs::metadata(&extracted_mount)?.modified()?;
+    assert_eq!(
+        archived_mtime
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        extracted_mount_mtime
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        "step 5: extracted file mtime through mount should match archived mtime"
+    );
+
+    let extracted_host = fixture.docs_target.join("archived.txt");
+    let extracted_host_mtime = fs::metadata(&extracted_host)?.modified()?;
+    assert_eq!(
+        archived_mtime
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        extracted_host_mtime
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        "step 5: extracted file mtime on host should match archived mtime"
+    );
+
+    // -----------------------------------------------------------------------
+    // Step 6: touch -d '2020-01-01T00:00:00' against a read-only entry must
+    // fail (EROFS) and must NOT change the host file's mtime.
+    // -----------------------------------------------------------------------
+    let ro_mount_file = fixture.workspace.join("notes/file.txt");
+    let ro_host_file = fixture.notes_target.join("file.txt");
+    let ro_mtime_before = fs::metadata(&ro_host_file)?.modified()?;
+
+    let touch_ro = std::process::Command::new("touch")
+        .args(["-d", "2020-01-01T00:00:00Z", ro_mount_file.to_str().unwrap()])
+        .output()?;
+    assert!(
+        !touch_ro.status.success(),
+        "step 6: touch -d on a read-only entry should have failed with EROFS but exited 0"
+    );
+
+    let ro_mtime_after = fs::metadata(&ro_host_file)?.modified()?;
+    assert_eq!(
+        ro_mtime_before
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        ro_mtime_after
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        "step 6: host file mtime must be unchanged after rejected touch on ro entry"
+    );
+
+    // -----------------------------------------------------------------------
+    // Teardown
+    // -----------------------------------------------------------------------
+    let stop = run(
+        &["stop", "--workspace", &fixture.workspace_arg()],
+        &fixture.envs(),
+    );
+    assert!(stop.status.success(), "{}", output_text(&stop));
+    wait_for_mounted_state(&fixture, false);
+
+    Ok(())
+}
