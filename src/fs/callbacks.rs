@@ -1166,10 +1166,6 @@ impl Filesystem for PortalFs {
     ) {
         let runtime = self.runtime.lock().unwrap();
         match runtime.handles.get(&fh.0) {
-            Some(handle) if handle.writable => match handle.file.sync_all() {
-                Ok(()) => reply.ok(),
-                Err(err) => reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO))),
-            },
             Some(_) => reply.ok(),
             None => reply.error(Errno::EBADF),
         }

@@ -728,6 +728,36 @@ fn fuse_e2e_file_lifecycle_covers_create_append_overwrite_truncate_and_fsync()
 
 #[test]
 #[ignore]
+fn fuse_e2e_flush_does_not_require_fsync() -> Result<(), Box<dyn Error>> {
+    require_fuse_prerequisites();
+
+    let fixture = Fixture::new();
+    start_rw_workspace(&fixture);
+
+    let mounted = fixture.workspace.join("docs/flush-no-fsync.txt");
+    let host = fixture.docs_target.join("flush-no-fsync.txt");
+
+    {
+        let mut file = File::create(&mounted)?;
+        file.write_all(b"hello-no-fsync")?;
+        // No sync_all / sync_data / flush — drop triggers FUSE flush+release.
+    }
+
+    assert_eq!(fs::read_to_string(&mounted)?, "hello-no-fsync");
+    assert_eq!(fs::read_to_string(&host)?, "hello-no-fsync");
+
+    let stop = run(
+        &["stop", "--workspace", &fixture.workspace_arg()],
+        &fixture.envs(),
+    );
+    assert!(stop.status.success(), "{}", output_text(&stop));
+    wait_for_mounted_state(&fixture, false);
+
+    Ok(())
+}
+
+#[test]
+#[ignore]
 fn fuse_e2e_hard_link_and_copy_cover_rustc_style_file_duplication() -> Result<(), Box<dyn Error>> {
     require_fuse_prerequisites();
 
