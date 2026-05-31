@@ -160,7 +160,12 @@ Supported options:
 --replace
 --follow-symlinks
 --no-follow-symlinks
+--name <name>
 ```
+
+Note:
+
+- `--name` is a deprecated alias for the positional `<mount-point>` argument
 
 Current note on symlink flags:
 
@@ -417,9 +422,10 @@ and target canonicalization.
 Current read-only behavior:
 
 - allow lookup, getattr, readdir, open for read, read, readlink
-- reject create, mkdir, unlink, rmdir, rename, truncate, and writes
-- return `EROFS`, `EPERM`, or related errno values as appropriate for the
-  specific operation
+- reject create, mkdir, symlink, link, unlink, rmdir, rename, truncate, and
+  writes
+- return `EROFS`, `EPERM`, `EACCES`, or related errno values as appropriate for
+  the specific operation
 
 ### Read-write entries
 
@@ -427,6 +433,7 @@ Current mounted implementation covers the common operations needed by normal
 development workflows:
 
 - lookup
+- forget
 - getattr
 - setattr
 - readdir
@@ -434,6 +441,8 @@ development workflows:
 - open
 - create
 - mkdir
+- symlink
+- link (same-entry hard links; cross-entry returns `EXDEV`)
 - unlink
 - rmdir
 - rename
@@ -443,10 +452,12 @@ development workflows:
 - flush
 - release
 - fsync
+- copy_file_range (with a manual read/write fallback)
 - releasedir
 - fsyncdir
-- statfs
-- basic `poll` and `ioctl` stubs
+- statfs (reports the backing store's real capacity)
+- `poll` (returns readiness derived from the open handle's kind and mode)
+- `ioctl` (returns `ENOTTY`; not supported)
 
 ### Revocation behavior
 
@@ -502,10 +513,16 @@ Current FUSE E2E coverage includes:
 - add/rm visibility
 - read/write flows
 - directory lifecycle
-- file lifecycle
+- file lifecycle (create/append/overwrite/truncate/fsync)
+- flush without a preceding fsync
 - read-only rejection
 - cross-entry rename rejection
+- rename destination is immediately openable
 - symlink traversal and broken-symlink behavior
+- symlink creation
+- hard-link and copy_file_range (rustc-style file duplication)
+- statfs backing-capacity reporting
+- setattr timestamp persistence
 - soft revocation/coherency checks
 - restart and remount recovery
 
