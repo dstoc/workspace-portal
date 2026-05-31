@@ -17,6 +17,7 @@ mod callbacks;
 mod path;
 mod resolve;
 mod runtime;
+mod safe_open;
 
 pub use path::{PortalPath, RenamePlan, ResolvedPortalPath, parse_portal_path};
 pub use resolve::{resolve_read_path, resolve_write_path, validate_rename};

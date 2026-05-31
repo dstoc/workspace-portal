@@ -107,10 +107,10 @@ pub(crate) fn directory_attr(
     }
 
     let resolved = state_for_path(state, path)?;
-    let metadata = fs::symlink_metadata(&resolved.target)?;
+    let metadata = super::safe_open::lstat(&resolved.entry.target, &resolved.relative)?;
     let read_only = entry_is_read_only(&resolved.entry, state.read_only_default);
     let entries = if metadata.file_type().is_dir() {
-        fs::read_dir(&resolved.target)?.count() as u32
+        super::safe_open::list_dir(&resolved.entry.target, &resolved.relative)?.len() as u32
     } else {
         0
     };
@@ -124,7 +124,7 @@ pub(crate) fn file_attr(
     path: &PortalPath,
 ) -> Result<FileAttr> {
     let resolved = state_for_path(state, path)?;
-    let metadata = fs::symlink_metadata(&resolved.target)?;
+    let metadata = super::safe_open::lstat(&resolved.entry.target, &resolved.relative)?;
     let ino = runtime.cache_portal_path(path.clone());
     Ok(attr_from_metadata(
         ino,

@@ -1508,6 +1508,10 @@ fn fuse_e2e_backing_store_swap_stays_confined_to_entry() -> Result<(), Box<dyn E
          (reported size {leaked_size} == outside file size)"
     );
 
+    // Release the handle before stopping; an open fd keeps the mount busy and
+    // would make the (non-force) unmount fail.
+    drop(held);
+
     let stop = run(
         &["stop", "--workspace", &fixture.workspace_arg()],
         &fixture.envs(),

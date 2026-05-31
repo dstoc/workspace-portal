@@ -1,12 +1,8 @@
 use std::{
     cmp,
     ffi::CString,
-    fs::{self, OpenOptions},
-    os::unix::{
-        ffi::OsStrExt,
-        fs::{FileExt, OpenOptionsExt, PermissionsExt, symlink},
-        io::AsRawFd,
-    },
+    fs,
+    os::unix::{ffi::OsStrExt, fs::FileExt, io::AsRawFd},
     path::Path,
     time::SystemTime,
 };
@@ -31,6 +27,7 @@ use super::{
     path::{PortalPath, child_portal_path, portal_path_to_pathbuf},
     resolve::{entry_is_read_only, errno_from_error, state_for_path, validate_rename},
     runtime::OpenHandleKind,
+    safe_open,
 };
 
 fn dir_entries(
@@ -65,10 +62,9 @@ fn dir_entries(
         }
         PortalPath::Entry { .. } => {
             let resolved = state_for_path(state, path)?;
-            let metadata = fs::symlink_metadata(&resolved.target)?;
-            if !metadata.file_type().is_dir() {
-                return Err(Error::TargetNotDirectory(resolved.target));
-            }
+            // Confined directory read beneath the entry target; fails (ENOTDIR)
+            // if the resolved path is not a directory.
+            let children = safe_open::list_dir(&resolved.entry.target, &resolved.relative)?;
 
             let mut entries = Vec::new();
             entries.push((
@@ -81,15 +77,12 @@ fn dir_entries(
             let parent_ino = runtime.cache_portal_path(parent.clone());
             entries.push((parent_ino, FileType::Directory, "..".to_owned(), parent));
 
-            for child in fs::read_dir(&resolved.target)? {
-                let child = child?;
-                let name = child.file_name();
+            for (name, file_type) in children {
                 let child_path = child_portal_path(path, &name)?;
-                let child_metadata = child.metadata()?;
                 let child_ino = runtime.cache_portal_path(child_path.clone());
                 entries.push((
                     child_ino,
-                    super::attr::file_type_from_metadata(&child_metadata),
+                    file_type,
                     name.to_string_lossy().into_owned(),
                     child_path,
                 ));
@@ -109,7 +102,7 @@ fn open_path(
     mode: u32,
 ) -> Result<FileHandle> {
     let resolved = state_for_path(state, path)?;
-    let metadata = fs::symlink_metadata(&resolved.target)?;
+    let metadata = safe_open::lstat(&resolved.entry.target, &resolved.relative)?;
     if metadata.file_type().is_dir() {
         return Err(Error::TargetNotDirectory(resolved.target));
     }
@@ -124,20 +117,20 @@ fn open_path(
         }
     }
 
-    let mut options = OpenOptions::new();
-    options.read(true);
-    if writable {
-        options.write(true);
-    }
+    let mut oflags = if writable { libc::O_RDWR } else { libc::O_RDONLY };
     if flags & libc::O_APPEND != 0 {
-        options.append(true);
+        oflags |= libc::O_APPEND;
     }
     if flags & libc::O_TRUNC != 0 {
-        options.truncate(true);
+        oflags |= libc::O_TRUNC;
     }
-    options.mode(mode & 0o7777);
 
-    let file = options.open(&resolved.target)?;
+    let file = safe_open::open_file(
+        &resolved.entry.target,
+        &resolved.relative,
+        oflags,
+        mode & 0o7777,
+    )?;
     Ok(runtime.handle_file(ino, file, OpenHandleKind::File, writable))
 }
 
@@ -237,7 +230,7 @@ impl Filesystem for PortalFs {
                 relative: std::path::PathBuf::new(),
             };
             let ino = runtime.cache_portal_path(path);
-            let metadata = match fs::symlink_metadata(&entry.target) {
+            let metadata = match safe_open::lstat(&entry.target, Path::new("")) {
                 Ok(metadata) => metadata,
                 Err(_) => {
                     debug!(
@@ -296,7 +289,7 @@ impl Filesystem for PortalFs {
                 return;
             }
         };
-        let metadata = match fs::symlink_metadata(&resolved.target) {
+        let metadata = match safe_open::lstat(&resolved.entry.target, &resolved.relative) {
             Ok(metadata) => metadata,
             Err(_) => {
                 debug!(
@@ -428,9 +421,11 @@ impl Filesystem for PortalFs {
         }
 
         if let Some(mode) = mode {
-            if let Err(err) =
-                fs::set_permissions(&resolved.target, fs::Permissions::from_mode(mode & 0o7777))
-            {
+            if let Err(err) = safe_open::chmod(
+                &resolved.entry.target,
+                &resolved.relative,
+                (mode & 0o7777) as libc::mode_t,
+            ) {
                 reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO)));
                 return;
             }
@@ -450,11 +445,7 @@ impl Filesystem for PortalFs {
                     }
                 }
             } else {
-                OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(&resolved.target)
-                    .and_then(|file| file.set_len(size))
+                safe_open::truncate(&resolved.entry.target, &resolved.relative, size)
             };
             if let Err(err) = result {
                 reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO)));
@@ -477,31 +468,21 @@ impl Filesystem for PortalFs {
                 })
             });
 
-            let rc = if let Some(fd) = use_fd {
-                unsafe { libc::futimens(fd, times.as_ptr()) }
-            } else {
-                let cpath = match CString::new(resolved.target.as_os_str().as_bytes()) {
-                    Ok(s) => s,
-                    Err(_) => {
-                        reply.error(Errno::from_i32(libc::EINVAL));
-                        return;
-                    }
-                };
-                unsafe {
-                    libc::utimensat(
-                        libc::AT_FDCWD,
-                        cpath.as_ptr(),
-                        times.as_ptr(),
-                        libc::AT_SYMLINK_NOFOLLOW,
-                    )
+            // Prefer futimens on an open writable handle; otherwise apply the
+            // timestamps through a confined resolution beneath the entry root.
+            let result: std::io::Result<()> = if let Some(fd) = use_fd {
+                let rc = unsafe { libc::futimens(fd, times.as_ptr()) };
+                if rc == -1 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
                 }
+            } else {
+                safe_open::set_times(&resolved.entry.target, &resolved.relative, &times)
             };
 
-            if rc == -1 {
-                let errno = std::io::Error::last_os_error()
-                    .raw_os_error()
-                    .unwrap_or(libc::EIO);
-                reply.error(Errno::from_i32(errno));
+            if let Err(err) = result {
+                reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO)));
                 return;
             }
         }
@@ -582,7 +563,7 @@ impl Filesystem for PortalFs {
                 return;
             }
         };
-        match fs::symlink_metadata(&resolved.target) {
+        match safe_open::lstat(&resolved.entry.target, &resolved.relative) {
             Ok(metadata) if metadata.file_type().is_dir() => {
                 reply.opened(FileHandle(0), FopenFlags::empty())
             }
@@ -665,18 +646,21 @@ impl Filesystem for PortalFs {
             return;
         };
 
-        let mut options = OpenOptions::new();
-        options.read(true).write(true).create_new(true);
-        options.mode((mode & !umask) & 0o7777);
+        let mut oflags = libc::O_CREAT | libc::O_EXCL | libc::O_RDWR;
         if flags & libc::O_TRUNC != 0 {
-            options.truncate(true);
+            oflags |= libc::O_TRUNC;
         }
 
-        match options.open(&resolved.target) {
+        match safe_open::create_file(
+            &resolved.entry.target,
+            &resolved.relative,
+            oflags,
+            ((mode & !umask) & 0o7777) as libc::mode_t,
+        ) {
             Ok(file) => {
                 let ino = runtime.cache_portal_path(path.clone());
                 let fh = runtime.handle_file(ino, file, OpenHandleKind::File, true);
-                let metadata = match fs::symlink_metadata(&resolved.target) {
+                let metadata = match safe_open::lstat(&resolved.entry.target, &resolved.relative) {
                     Ok(metadata) => metadata,
                     Err(err) => {
                         reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO)));
@@ -724,16 +708,17 @@ impl Filesystem for PortalFs {
             return;
         };
 
-        match fs::create_dir(&resolved.target) {
+        let dir_mode = ((mode & !umask) & 0o7777) as libc::mode_t;
+        match safe_open::mkdir(&resolved.entry.target, &resolved.relative, dir_mode) {
             Ok(()) => {
-                if let Err(err) = fs::set_permissions(
-                    &resolved.target,
-                    fs::Permissions::from_mode((mode & !umask) & 0o7777),
-                ) {
+                // Force the requested permissions (mkdirat applies the umask).
+                if let Err(err) =
+                    safe_open::chmod(&resolved.entry.target, &resolved.relative, dir_mode)
+                {
                     reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO)));
                     return;
                 }
-                let metadata = match fs::symlink_metadata(&resolved.target) {
+                let metadata = match safe_open::lstat(&resolved.entry.target, &resolved.relative) {
                     Ok(metadata) => metadata,
                     Err(err) => {
                         reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO)));
@@ -775,9 +760,9 @@ impl Filesystem for PortalFs {
             return;
         };
 
-        match symlink(target, &resolved.target) {
+        match safe_open::symlink(&resolved.entry.target, &resolved.relative, target) {
             Ok(()) => {
-                let metadata = match fs::symlink_metadata(&resolved.target) {
+                let metadata = match safe_open::lstat(&resolved.entry.target, &resolved.relative) {
                     Ok(metadata) => metadata,
                     Err(err) => {
                         reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO)));
@@ -811,9 +796,9 @@ impl Filesystem for PortalFs {
             return;
         };
 
-        match fs::symlink_metadata(&resolved.target) {
+        match safe_open::lstat(&resolved.entry.target, &resolved.relative) {
             Ok(metadata) if metadata.file_type().is_dir() => reply.error(Errno::EISDIR),
-            Ok(_) => match fs::remove_file(&resolved.target) {
+            Ok(_) => match safe_open::unlink(&resolved.entry.target, &resolved.relative) {
                 Ok(()) => reply.ok(),
                 Err(err) => reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO))),
             },
@@ -835,7 +820,7 @@ impl Filesystem for PortalFs {
             return;
         };
 
-        match fs::remove_dir(&resolved.target) {
+        match safe_open::rmdir(&resolved.entry.target, &resolved.relative) {
             Ok(()) => reply.ok(),
             Err(err) => reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO))),
         }
@@ -882,7 +867,11 @@ impl Filesystem for PortalFs {
             portal_path_to_pathbuf(&source_path),
             portal_path_to_pathbuf(&target_path),
         ) {
-            Ok(_) => match fs::rename(&source_resolved.target, &target_resolved.target) {
+            Ok(_) => match safe_open::rename(
+                &source_resolved.entry.target,
+                &source_resolved.relative,
+                &target_resolved.relative,
+            ) {
                 Ok(()) => {
                     runtime.rename_cached_subtree(&source_path, &target_path);
                     debug!(
@@ -992,7 +981,7 @@ impl Filesystem for PortalFs {
             return;
         }
 
-        match fs::symlink_metadata(&source_resolved.target) {
+        match safe_open::lstat(&source_resolved.entry.target, &source_resolved.relative) {
             Ok(metadata) if metadata.file_type().is_dir() => {
                 reply.error(Errno::EPERM);
                 return;
@@ -1004,9 +993,16 @@ impl Filesystem for PortalFs {
             }
         }
 
-        match fs::hard_link(&source_resolved.target, &target_resolved.target) {
+        match safe_open::hard_link(
+            &target_resolved.entry.target,
+            &source_resolved.relative,
+            &target_resolved.relative,
+        ) {
             Ok(()) => {
-                let metadata = match fs::symlink_metadata(&target_resolved.target) {
+                let metadata = match safe_open::lstat(
+                    &target_resolved.entry.target,
+                    &target_resolved.relative,
+                ) {
                     Ok(metadata) => metadata,
                     Err(err) => {
                         reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO)));
@@ -1084,17 +1080,9 @@ impl Filesystem for PortalFs {
             }
         };
 
-        match fs::read_link(&resolved.target) {
+        match safe_open::readlink(&resolved.entry.target, &resolved.relative) {
             Ok(target) => {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::ffi::OsStrExt;
-                    reply.data(target.as_os_str().as_bytes());
-                }
-                #[cfg(not(unix))]
-                {
-                    reply.data(target.to_string_lossy().as_bytes());
-                }
+                reply.data(target.as_os_str().as_bytes());
             }
             Err(err) => reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO))),
         }
@@ -1355,20 +1343,25 @@ impl Filesystem for PortalFs {
     fn statfs(&self, _req: &Request, ino: INodeNo, reply: ReplyStatfs) {
         let state = self.state.read().unwrap().clone();
 
-        // Resolve the path to measure: root inode → workspace dir, else → entry target.
-        let measure_path: std::path::PathBuf = if ino == ROOT_INO {
-            state.workspace.clone()
+        // Measure the filesystem backing the queried inode: root inode → workspace
+        // dir; otherwise the entry target, resolved confined beneath the entry.
+        let measured = if ino == ROOT_INO {
+            statvfs_for(&state.workspace)
         } else {
             let mut runtime = self.runtime.lock().unwrap();
-            let maybe_path = runtime.path_for_inode(&state, ino);
-            match maybe_path.and_then(|p| state_for_path(&state, &p).ok()) {
-                Some(resolved) => resolved.target.clone(),
-                None => state.workspace.clone(),
+            let resolved = runtime
+                .path_for_inode(&state, ino)
+                .and_then(|p| state_for_path(&state, &p).ok());
+            match resolved {
+                Some(resolved) => {
+                    safe_open::statvfs(&resolved.entry.target, &resolved.relative).ok()
+                }
+                None => None,
             }
         };
 
-        // Try the resolved path, then fall back to workspace, then use hardcoded values.
-        let buf = statvfs_for(&measure_path).or_else(|| statvfs_for(&state.workspace));
+        // Fall back to the workspace, then to hardcoded values.
+        let buf = measured.or_else(|| statvfs_for(&state.workspace));
 
         match buf {
             Some(buf) => {
