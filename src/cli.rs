@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 use crate::{
-    daemon::{self, AddArgs, CheckArgs, ListArgs, RemoveArgs, StartArgs, StatusArgs, StopArgs},
+    daemon::{
+        self, AddArgs, CheckArgs, EditArgs, ListArgs, RemoveArgs, StartArgs, StatusArgs, StopArgs,
+    },
     error::{Error, Result},
     state::RevocationMode,
 };
@@ -28,6 +30,7 @@ pub enum Commands {
     Stop(StopCommand),
     List,
     Check(CheckCommand),
+    Edit(EditCommand),
 }
 
 #[derive(Debug, Parser)]
@@ -171,6 +174,15 @@ pub struct CheckCommand {
     pub workspace: Option<PathBuf>,
 }
 
+#[derive(Debug, Parser)]
+pub struct EditCommand {
+    #[arg(
+        long,
+        help = "Override workspace discovery with an explicit workspace path"
+    )]
+    pub workspace: Option<PathBuf>,
+}
+
 pub async fn run() -> Result<()> {
     init_tracing();
     let cli = Cli::parse();
@@ -238,6 +250,12 @@ pub async fn run() -> Result<()> {
         Commands::List => daemon::list(ListArgs).await,
         Commands::Check(cmd) => {
             daemon::check(CheckArgs {
+                workspace: cmd.workspace,
+            })
+            .await
+        }
+        Commands::Edit(cmd) => {
+            daemon::edit(EditArgs {
                 workspace: cmd.workspace,
             })
             .await

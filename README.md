@@ -79,10 +79,10 @@ Mount:     mounted
 Daemon:    running
 Socket:    /run/user/1000/workspace-portal/7f3a.sock
 
-ENTRY      MODE TARGET
------      ---- ------
-project-a  rw   /home/user/code/project-a
-notes      ro   /home/user/notes/current
+ENTRY     TARGET                    MODE
+-----     ------                    ----
+project-a /home/user/code/project-a rw
+notes     /home/user/notes/current  ro
 ```
 
 List known workspaces:
@@ -153,6 +153,20 @@ Options:
 
 - `--soft` uses soft revocation behavior
 - `--hard` requests hard revocation semantics where supported
+
+### `edit`
+
+Edit the whole entry set at once in your editor:
+
+```bash
+workspace-portal edit [--workspace <path>]
+```
+
+Opens the current entries in `$VISUAL`/`$EDITOR`/`vi` as an `ENTRY TARGET MODE`
+table. On save, the difference is applied to the running mount — add, remove,
+rename, retarget, or flip entries between `ro` and `rw`. Flipping or removing an
+entry leaves file handles that are already open undisturbed; only later opens
+see the change. An unchanged or invalid buffer applies nothing.
 
 ### `status`
 

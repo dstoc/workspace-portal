@@ -1,4 +1,5 @@
 pub(crate) mod background;
+pub(crate) mod entry_format;
 pub(crate) mod mount;
 pub(crate) mod output;
 pub(crate) mod runtime;
@@ -16,7 +17,7 @@ use std::{
 use crate::{
     error::{Error, Result},
     paths,
-    protocol::{self, ControlRequest, ControlResponse, StatusPayload},
+    protocol::{self, ControlRequest, ControlResponse, EntryState, StatusPayload},
     state::{AccessMode, DaemonStatus, RevocationMode},
 };
 
@@ -82,6 +83,11 @@ pub struct ListArgs;
 
 #[derive(Debug, Clone)]
 pub struct CheckArgs {
+    pub workspace: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EditArgs {
     pub workspace: Option<PathBuf>,
 }
 
@@ -391,6 +397,128 @@ pub async fn check(args: CheckArgs) -> Result<()> {
     println!("Entries: {}", state.entries.len());
 
     Ok(())
+}
+
+pub async fn edit(args: EditArgs) -> Result<()> {
+    let (ctx, live_state) = load_workspace_context(args.workspace)?;
+
+    // Step 2: Determine the authoritative "before" entry set.
+    let before: Vec<EntryState> = if socket_is_live(&ctx.socket)? {
+        match send_request(&ctx.socket, &ControlRequest::Status)? {
+            ControlResponse::Status { workspace } => {
+                workspace.entries.into_iter().map(Into::into).collect()
+            }
+            other => return Err(response_unexpected(other)),
+        }
+    } else {
+        live_state
+            .snapshot()
+            .entries
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    };
+
+    // Step 3: Render the initial buffer.
+    let original_buffer = entry_format::render_entries(&before, true);
+    let original_bytes = original_buffer.as_bytes().to_vec();
+
+    // Step 4: Write to a temp file.
+    let temp_path = {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!(
+            "workspace-portal-edit-{}-{}.conf",
+            std::process::id(),
+            nanos
+        ))
+    };
+
+    fs::write(&temp_path, &original_bytes)?;
+    let _guard = TempFileGuard {
+        path: temp_path.clone(),
+    };
+
+    // Step 5: Resolve the editor.
+    let editor = std::env::var_os("VISUAL")
+        .or_else(|| std::env::var_os("EDITOR"))
+        .unwrap_or_else(|| std::ffi::OsString::from("vi"));
+
+    // Step 6: Editor round-trip loop.
+    let mut prev_bytes: Option<Vec<u8>> = None;
+    let after: Vec<EntryState> = loop {
+        // Launch the editor.
+        let status = std::process::Command::new(&editor)
+            .arg(&temp_path)
+            .status()
+            .map_err(Error::Io)?;
+
+        if !status.success() {
+            println!("no changes");
+            return Ok(());
+        }
+
+        // Read the file back.
+        let current_bytes = fs::read(&temp_path)?;
+
+        // If byte-identical to the ORIGINAL buffer on first pass → no changes.
+        if prev_bytes.is_none() && current_bytes == original_bytes {
+            println!("no changes");
+            return Ok(());
+        }
+
+        // Parse and validate.
+        let text = String::from_utf8_lossy(&current_bytes);
+        match entry_format::parse_entries(&text).and_then(|parsed| {
+            entry_format::validate_entries(&parsed)?;
+            Ok(parsed)
+        }) {
+            Ok(parsed) => break parsed,
+            Err(err) => {
+                // If bytes are unchanged from the previous failed iteration → give up.
+                // (main prints the returned error, so don't echo it here.)
+                if let Some(ref prev) = prev_bytes {
+                    if current_bytes == *prev {
+                        return Err(err);
+                    }
+                }
+                eprintln!("{err}");
+                eprintln!("(The buffer will be reopened for further editing.)");
+                prev_bytes = Some(current_bytes);
+                // Loop: re-launch the editor on the same temp file.
+            }
+        }
+    };
+
+    // Step 7: Compute the diff.
+    let plan = entry_format::plan_edit(&before, &after);
+    if plan.is_empty() {
+        println!("no changes");
+        return Ok(());
+    }
+
+    // Step 8: Send each request in the plan.
+    for req in &plan {
+        let response = send_request(&ctx.socket, req)?;
+        ensure_response_ok(response)?;
+    }
+
+    // Step 9: Report success.
+    println!("applied {} change(s)", plan.len());
+    Ok(())
+}
+
+/// RAII guard that removes a temporary file when dropped.
+struct TempFileGuard {
+    path: PathBuf,
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 fn send_request(socket: &Path, request: &ControlRequest) -> Result<ControlResponse> {

@@ -163,7 +163,15 @@ impl PortalState {
 
         self.generation = self.generation.saturating_add(1);
         let mut entry = entry;
-        entry.generation = self.generation;
+        // The entry's `generation` is surfaced as the FUSE inode generation, which
+        // must stay stable while the inode keeps mapping to the same object. A
+        // top-level entry's identity is its `target`, so an in-place replace that
+        // leaves the target unchanged (e.g. an `edit` mode flip) preserves the
+        // existing generation; a new entry or a changed target gets a fresh one.
+        entry.generation = match self.entries.get(&entry.name) {
+            Some(existing) if existing.target == entry.target => existing.generation,
+            _ => self.generation,
+        };
         self.entries.insert(entry.name.clone(), entry);
         Ok(())
     }
@@ -270,6 +278,57 @@ mod tests {
         assert_eq!(removed.name, "docs");
         assert_eq!(state.generation, 2);
         assert!(state.entry("docs").is_none());
+    }
+
+    #[test]
+    fn replace_with_same_target_preserves_entry_generation() {
+        let workspace = unique_path("state-workspace-gen");
+        let mut state = PortalState::new(
+            workspace.clone(),
+            "abc123".to_owned(),
+            workspace.join("socket.sock"),
+        );
+
+        // First add: new entry gets a fresh generation.
+        state
+            .add_entry(
+                EntryRecord::new("docs", PathBuf::from("/tmp/docs"), AccessMode::ReadWrite),
+                false,
+            )
+            .unwrap();
+        let g0 = state.entry("docs").unwrap().generation;
+        assert_eq!(g0, 1, "first add should yield generation == 1");
+
+        // Same-target replace (mode flip): entry generation must be preserved.
+        state
+            .add_entry(
+                EntryRecord::new("docs", PathBuf::from("/tmp/docs"), AccessMode::ReadOnly),
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            state.entry("docs").unwrap().generation,
+            g0,
+            "same-target replace must preserve entry generation"
+        );
+        assert_eq!(
+            state.entry("docs").unwrap().mode,
+            AccessMode::ReadOnly,
+            "mode must be updated after same-target replace"
+        );
+
+        // Changed-target replace: entry should get a new (different) generation.
+        state
+            .add_entry(
+                EntryRecord::new("docs", PathBuf::from("/tmp/docs2"), AccessMode::ReadOnly),
+                true,
+            )
+            .unwrap();
+        assert_ne!(
+            state.entry("docs").unwrap().generation,
+            g0,
+            "changed-target replace must assign a fresh generation"
+        );
     }
 
     #[test]

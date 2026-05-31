@@ -2,7 +2,11 @@ use std::{
     cmp,
     ffi::CString,
     fs::{self, OpenOptions},
-    os::unix::{ffi::OsStrExt, fs::{symlink, FileExt, OpenOptionsExt, PermissionsExt}, io::AsRawFd},
+    os::unix::{
+        ffi::OsStrExt,
+        fs::{FileExt, OpenOptionsExt, PermissionsExt, symlink},
+        io::AsRawFd,
+    },
     path::Path,
     time::SystemTime,
 };
@@ -362,7 +366,10 @@ impl Filesystem for PortalFs {
                 if matches!(&err, Error::EntryNotFound(_) | Error::TargetNotFound(_)) {
                     if let Some(metadata) = runtime.open_handle_metadata(ino) {
                         let attr = attr_from_metadata(ino, &metadata, false, 0);
-                        debug!("getattr ino={} path={:?} -> ok (revoked, fstat fallback)", ino.0, path);
+                        debug!(
+                            "getattr ino={} path={:?} -> ok (revoked, fstat fallback)",
+                            ino.0, path
+                        );
                         reply.attr(&TTL, &attr);
                         return;
                     }
@@ -456,10 +463,8 @@ impl Filesystem for PortalFs {
         }
 
         if atime.is_some() || mtime.is_some() {
-            let times: [libc::timespec; 2] = [
-                timeornow_to_timespec(atime),
-                timeornow_to_timespec(mtime),
-            ];
+            let times: [libc::timespec; 2] =
+                [timeornow_to_timespec(atime), timeornow_to_timespec(mtime)];
 
             // Prefer futimens on an open writable handle; fall back to utimensat on path.
             let use_fd: Option<i32> = fh.and_then(|fh| {
@@ -1129,17 +1134,13 @@ impl Filesystem for PortalFs {
             reply.error(Errno::ENOENT);
             return;
         };
-        let resolved = match state_for_path(&state, &path) {
-            Ok(resolved) => resolved,
+        match state_for_path(&state, &path) {
+            Ok(_) => {}
             Err(_) => {
                 reply.error(Errno::ENOENT);
                 return;
             }
         };
-        if entry_is_read_only(&resolved.entry, state.read_only_default) {
-            reply.error(Errno::EROFS);
-            return;
-        }
 
         let Some(handle) = runtime.handles.get(&fh.0) else {
             reply.error(Errno::EBADF);
@@ -1367,12 +1368,15 @@ impl Filesystem for PortalFs {
         };
 
         // Try the resolved path, then fall back to workspace, then use hardcoded values.
-        let buf = statvfs_for(&measure_path)
-            .or_else(|| statvfs_for(&state.workspace));
+        let buf = statvfs_for(&measure_path).or_else(|| statvfs_for(&state.workspace));
 
         match buf {
             Some(buf) => {
-                let namelen = if buf.f_namemax == 0 { 255 } else { buf.f_namemax as u32 };
+                let namelen = if buf.f_namemax == 0 {
+                    255
+                } else {
+                    buf.f_namemax as u32
+                };
                 reply.statfs(
                     buf.f_blocks as u64,
                     buf.f_bfree as u64,

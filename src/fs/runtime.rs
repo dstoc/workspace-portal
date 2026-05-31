@@ -264,6 +264,84 @@ mod tests {
     use super::*;
 
     #[test]
+    fn add_entry_replace_does_not_touch_open_handles() {
+        use std::os::unix::io::AsRawFd;
+
+        // Build a unique temp dir and file for this test.
+        let pid = std::process::id();
+        let tmp_dir =
+            std::env::temp_dir().join(format!("workspace-portal-handle-preservation-{pid}"));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let tmp_file = tmp_dir.join("held.txt");
+
+        // 1. Build a PortalState with one "docs" entry (ReadWrite).
+        let workspace = tmp_dir.join("workspace");
+        let mut state = PortalState::new(
+            workspace.clone(),
+            "test-workspace-id".to_owned(),
+            workspace.join("socket.sock"),
+        );
+        state
+            .add_entry(
+                crate::state::EntryRecord::new(
+                    "docs",
+                    tmp_dir.clone(),
+                    crate::state::AccessMode::ReadWrite,
+                ),
+                false,
+            )
+            .unwrap();
+
+        // 2. Construct a FuseRuntime and insert an OpenHandle with writable=true.
+        let mut runtime = FuseRuntime::new();
+        let file = std::fs::File::create(&tmp_file).unwrap();
+        let fd = file.as_raw_fd();
+        runtime.handles.insert(
+            1u64,
+            OpenHandle {
+                ino: INodeNo(2),
+                file,
+                kind: OpenHandleKind::File,
+                writable: true,
+            },
+        );
+
+        // 3. Flip "docs" from ReadWrite → ReadOnly via add_entry(replace=true).
+        state
+            .add_entry(
+                crate::state::EntryRecord::new(
+                    "docs",
+                    tmp_dir.clone(),
+                    crate::state::AccessMode::ReadOnly,
+                ),
+                true,
+            )
+            .unwrap();
+
+        // 4. Assert the entry's mode is now ReadOnly …
+        assert_eq!(
+            state.entry("docs").unwrap().mode,
+            crate::state::AccessMode::ReadOnly,
+            "entry mode should have been flipped to ReadOnly"
+        );
+        // … and the stored handle is completely untouched.
+        let handle = runtime.handles.get(&1u64).expect("handle must still exist");
+        assert!(
+            handle.writable,
+            "handle.writable must remain true after mode flip"
+        );
+        assert_eq!(
+            handle.file.as_raw_fd(),
+            fd,
+            "handle fd must be unchanged after mode flip"
+        );
+
+        // 5. Clean up.
+        drop(runtime); // drops the File, closing the fd
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
     fn rename_cached_subtree_preserves_inodes_and_moves_descendants() {
         let mut runtime = FuseRuntime::new();
         let source = PortalPath::Entry {

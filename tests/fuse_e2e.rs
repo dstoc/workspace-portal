@@ -1,7 +1,7 @@
 use std::{
     env,
     error::Error,
-    fs::{self, File, OpenOptions},
+    fs::{self, File, OpenOptions, Permissions},
     io::{ErrorKind, Read, Write},
     path::{Path, PathBuf},
     process::{Command, Output},
@@ -985,7 +985,10 @@ fn fuse_e2e_statfs_reports_backing_capacity() -> Result<(), Box<dyn Error>> {
     start_rw_workspace(&fixture);
 
     let entry_path = fixture.workspace.join("docs");
-    assert!(entry_path.exists(), "docs entry should be visible in the mount");
+    assert!(
+        entry_path.exists(),
+        "docs entry should be visible in the mount"
+    );
 
     // -P = POSIX output (stable columns), -k = 1K blocks. Columns:
     // Filesystem  1024-blocks  Used  Available  Capacity  Mounted-on
@@ -1072,8 +1075,8 @@ fn fuse_e2e_setattr_persists_timestamps() -> Result<(), Box<dyn Error>> {
         String::from_utf8_lossy(&touch_2020.stderr)
     );
 
-    let expected_2020_mtime = std::time::SystemTime::UNIX_EPOCH
-        + std::time::Duration::from_secs(1577836800); // 2020-01-01T00:00:00 UTC
+    let expected_2020_mtime =
+        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1577836800); // 2020-01-01T00:00:00 UTC
 
     let mount_mtime_2020 = fs::metadata(&mount_file)?.modified()?;
     assert!(
@@ -1180,7 +1183,11 @@ fn fuse_e2e_setattr_persists_timestamps() -> Result<(), Box<dyn Error>> {
 
     let mount_dst = fixture.workspace.join("docs/dst-cp.txt");
     let cp_p = std::process::Command::new("cp")
-        .args(["-p", src_file.to_str().unwrap(), mount_dst.to_str().unwrap()])
+        .args([
+            "-p",
+            src_file.to_str().unwrap(),
+            mount_dst.to_str().unwrap(),
+        ])
         .output()?;
     assert!(
         cp_p.status.success(),
@@ -1225,11 +1232,7 @@ fn fuse_e2e_setattr_persists_timestamps() -> Result<(), Box<dyn Error>> {
     let archived_file = tar_staging.join("archived.txt");
     fs::write(&archived_file, "archived-data")?;
     let touch_archived = std::process::Command::new("touch")
-        .args([
-            "-d",
-            "2018-03-10T08:00:00",
-            archived_file.to_str().unwrap(),
-        ])
+        .args(["-d", "2018-03-10T08:00:00", archived_file.to_str().unwrap()])
         .output()?;
     assert!(
         touch_archived.status.success(),
@@ -1307,7 +1310,11 @@ fn fuse_e2e_setattr_persists_timestamps() -> Result<(), Box<dyn Error>> {
     let ro_mtime_before = fs::metadata(&ro_host_file)?.modified()?;
 
     let touch_ro = std::process::Command::new("touch")
-        .args(["-d", "2020-01-01T00:00:00Z", ro_mount_file.to_str().unwrap()])
+        .args([
+            "-d",
+            "2020-01-01T00:00:00Z",
+            ro_mount_file.to_str().unwrap(),
+        ])
         .output()?;
     assert!(
         !touch_ro.status.success(),
@@ -1330,6 +1337,140 @@ fn fuse_e2e_setattr_persists_timestamps() -> Result<(), Box<dyn Error>> {
     // -----------------------------------------------------------------------
     // Teardown
     // -----------------------------------------------------------------------
+    let stop = run(
+        &["stop", "--workspace", &fixture.workspace_arg()],
+        &fixture.envs(),
+    );
+    assert!(stop.status.success(), "{}", output_text(&stop));
+    wait_for_mounted_state(&fixture, false);
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Helper: run `edit` with a custom editor path.
+//
+// Extends fixture.envs() with VISUAL and EDITOR both set to `editor_script`.
+// ---------------------------------------------------------------------------
+fn run_edit_with_editor(fixture: &Fixture, editor_script: &Path) -> Output {
+    let base_envs = fixture.envs();
+    let mut env_vec: Vec<(&str, &Path)> = base_envs.to_vec();
+    env_vec.push(("VISUAL", editor_script));
+    env_vec.push(("EDITOR", editor_script));
+    run(&["edit", "--workspace", &fixture.workspace_arg()], &env_vec)
+}
+
+#[test]
+#[ignore]
+fn fuse_e2e_edit_rw_to_ro_preserves_held_write_handle() -> Result<(), Box<dyn Error>> {
+    require_fuse_prerequisites();
+
+    let fixture = Fixture::new();
+    start_rw_workspace(&fixture);
+
+    // Create a file under the rw docs entry through the mount.
+    fs::write(fixture.workspace.join("docs/held.txt"), "v1")?;
+
+    // Open a long-lived write handle BEFORE flipping the entry to ro.
+    let mut held = OpenOptions::new()
+        .write(true)
+        .open(fixture.workspace.join("docs/held.txt"))?;
+    held.write_all(b"v1-held")?;
+
+    // Build a sed editor script that flips "rw" → "ro" in the last column.
+    // Data rows end with " rw"; header/comment lines begin with "#" and are ignored.
+    let script_path = std::env::temp_dir().join(format!(
+        "workspace-portal-edit-flip-{}.sh",
+        std::process::id()
+    ));
+    fs::write(&script_path, b"#!/bin/sh\nsed -i 's/ rw$/ ro/' \"$1\"\n")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script_path, Permissions::from_mode(0o755))?;
+    }
+
+    // Run `workspace-portal edit` with the flip script.
+    let edited = run_edit_with_editor(&fixture, &script_path);
+    assert!(edited.status.success(), "{}", output_text(&edited));
+
+    // Confirm the flip took effect: docs entry must now be "ro".
+    let st = status_json(&fixture);
+    let entries = st["entries"].as_array().expect("entries must be an array");
+    let docs_entry = entries
+        .iter()
+        .find(|e| e["name"].as_str() == Some("docs"))
+        .expect("docs entry must still be present");
+    assert_eq!(
+        docs_entry["mode"].as_str(),
+        Some("ro"),
+        "docs entry mode must be 'ro' after edit, status: {st}"
+    );
+
+    // The HELD fd must still accept writes (handle captured when rw, unaffected by flip).
+    held.write_all(b"v2-after-flip")
+        .expect("held write handle must still be writable after mode flip");
+    drop(held);
+
+    // A FRESH open for write must now be rejected (entry is ro).
+    let fresh = OpenOptions::new()
+        .write(true)
+        .open(fixture.workspace.join("docs/held.txt"));
+    let err = fresh.expect_err("a fresh write-open on a now-ro entry must fail");
+    assert!(
+        matches!(
+            err.kind(),
+            std::io::ErrorKind::ReadOnlyFilesystem | std::io::ErrorKind::PermissionDenied
+        ),
+        "fresh write-open must be rejected for access reasons, got: {err:?}"
+    );
+
+    // Clean up.
+    let _ = fs::remove_file(&script_path);
+    let stop = run(
+        &["stop", "--workspace", &fixture.workspace_arg()],
+        &fixture.envs(),
+    );
+    assert!(stop.status.success(), "{}", output_text(&stop));
+    wait_for_mounted_state(&fixture, false);
+
+    Ok(())
+}
+
+#[test]
+#[ignore]
+fn fuse_e2e_edit_unchanged_buffer_reports_no_changes() -> Result<(), Box<dyn Error>> {
+    require_fuse_prerequisites();
+
+    let fixture = Fixture::new();
+    start_rw_workspace(&fixture);
+
+    // Use /bin/true as the editor: it exits 0 without touching the buffer file.
+    let true_path = Path::new("/bin/true");
+
+    let edited = run_edit_with_editor(&fixture, true_path);
+    assert!(edited.status.success(), "{}", output_text(&edited));
+
+    // The command must report "no changes".
+    let text = output_text(&edited);
+    assert!(
+        text.contains("no changes"),
+        "expected 'no changes' in output, got: {text}"
+    );
+
+    // docs entry must still be present and rw.
+    let st = status_json(&fixture);
+    let entries = st["entries"].as_array().expect("entries must be an array");
+    let docs_entry = entries
+        .iter()
+        .find(|e| e["name"].as_str() == Some("docs"))
+        .expect("docs entry must still be present after no-op edit");
+    assert_eq!(
+        docs_entry["mode"].as_str(),
+        Some("rw"),
+        "docs entry mode must remain 'rw' after no-op edit"
+    );
+
     let stop = run(
         &["stop", "--workspace", &fixture.workspace_arg()],
         &fixture.envs(),

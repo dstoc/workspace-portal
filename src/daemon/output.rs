@@ -1,6 +1,8 @@
 use std::{env, path::PathBuf};
 
-use crate::state::{AccessMode, DaemonStatus, WorkspaceSnapshot};
+use crate::state::{DaemonStatus, WorkspaceSnapshot};
+
+use super::entry_format;
 
 pub(crate) fn print_status(snapshot: WorkspaceSnapshot) {
     println!("Workspace: {}", snapshot.workspace.display());
@@ -22,15 +24,8 @@ pub(crate) fn print_status(snapshot: WorkspaceSnapshot) {
     );
     println!("Socket:    {}", snapshot.socket.display());
     println!();
-    println!("{:<10} {:<4} TARGET", "ENTRY", "MODE");
-    println!("{:<10} {:<4} ------", "-----", "----");
-    for entry in snapshot.entries {
-        let mode = match entry.mode {
-            AccessMode::ReadOnly => "ro",
-            AccessMode::ReadWrite => "rw",
-        };
-        println!("{:<10} {:<4} {}", entry.name, mode, entry.target.display());
-    }
+    let entries: Vec<_> = snapshot.entries.into_iter().map(Into::into).collect();
+    print!("{}", entry_format::render_entries(&entries, false));
 }
 
 pub(crate) fn print_prerequisite_report(
