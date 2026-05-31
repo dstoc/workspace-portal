@@ -168,6 +168,8 @@ fn cli_validation_rejects_conflicting_flags() {
     assert!(!add.status.success());
     assert!(output_text(&add).contains("choose either --ro or --rw"));
 
+    // The removed hard/soft revocation knob is no longer a flag; clap rejects it
+    // as an unexpected argument.
     let rm = run(
         &[
             "rm",
@@ -175,12 +177,11 @@ fn cli_validation_rejects_conflicting_flags() {
             "--workspace",
             &fixture.workspace_arg(),
             "--hard",
-            "--soft",
         ],
         &fixture.envs(),
     );
     assert!(!rm.status.success());
-    assert!(output_text(&rm).contains("choose either --hard or --soft"));
+    assert!(output_text(&rm).contains("--hard"));
 }
 
 #[test]

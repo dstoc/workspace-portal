@@ -158,24 +158,19 @@ Supported options:
 --ro
 --rw
 --replace
---follow-symlinks
---no-follow-symlinks
 --name <name>
 ```
 
 Note:
 
 - `--name` is a deprecated alias for the positional `<mount-point>` argument
-
-Current note on symlink flags:
-
-- the flags are accepted by the CLI, but the implementation still canonicalizes
-  targets rather than providing a differentiated symlink policy
+- the target argument is always canonicalized (symlinks in the target path are
+  resolved when the entry is registered); there is no per-entry symlink policy
 
 ### `rm`
 
 ```bash
-workspace-portal rm <mount-point> [--workspace <path>] [--soft|--hard]
+workspace-portal rm <mount-point> [--workspace <path>]
 ```
 
 Current behavior:
@@ -186,9 +181,8 @@ Current behavior:
 
 Notes:
 
-- this is soft-revocation behavior
-- `--hard` is parsed and carried through the protocol surface, but there is no
-  stronger hard-revocation implementation yet
+- this is soft-revocation behavior, and the only behavior: removing an entry
+  never forcibly tears down handles that are already open
 
 ### `status`
 
@@ -349,7 +343,7 @@ Current request types:
 {"op":"ping"}
 {"op":"status"}
 {"op":"add","name":"project-a","target":"/home/user/code/project-a","mode":"rw","replace":false}
-{"op":"remove","name":"project-a","revocation":"soft"}
+{"op":"remove","name":"project-a"}
 {"op":"stop"}
 ```
 
@@ -461,13 +455,15 @@ development workflows:
 
 ### Revocation behavior
 
-Current behavior on `rm` is soft revocation:
+`rm` uses soft revocation, and it is the only behavior:
 
 - new lookups fail immediately
 - removed entries disappear from the namespace
 - existing open file descriptors continue to work until closed
 
-There is no stronger hard-revocation path yet.
+There is intentionally no hard-revocation mode: removing an entry never forcibly
+tears down handles that are already open. If forced teardown is ever needed it
+would be a separate feature (FUSE inode invalidation), not a flag.
 
 ### Rename behavior
 
@@ -493,11 +489,15 @@ Known current limits:
 - Linux and `fuse3` focused
 - top-level entries only
 - no subtree-level read-only policy inside an entry
-- no stronger hard-revocation semantics
-- symlink confinement is not yet hardened with `openat2`-style resolution
-- `--follow-symlinks` and `--no-follow-symlinks` do not yet produce distinct
-  runtime behavior
+- soft revocation only by design (no forced teardown of open handles)
 - state and discovery are registry-based; there is no in-workspace metadata file
+
+Daemon-side path resolution is confined beneath each entry target using
+`openat2(RESOLVE_BENEATH)`, so the daemon never reads or writes outside the
+entry even if the backing store is mutated under it. Symlinks inside an entry
+are served verbatim; the consumer's kernel resolves them in the consumer's own
+namespace, so an absolute or escaping symlink resolves against the consumer's
+root (not the host's) — the mount is a confined view, not a sandbox beyond that.
 
 ## Testing and verification
 

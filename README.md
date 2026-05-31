@@ -139,7 +139,6 @@ Options:
 - `--ro` adds a read-only entry
 - `--rw` adds a writable entry
 - `--replace` replaces an existing entry
-- `--follow-symlinks` / `--no-follow-symlinks` control target handling policy
 
 ### `rm`
 
@@ -149,10 +148,8 @@ Remove a top-level entry:
 workspace-portal rm <mount-point> [--workspace <path>]
 ```
 
-Options:
-
-- `--soft` uses soft revocation behavior
-- `--hard` requests hard revocation semantics where supported
+Removing an entry drops it from the namespace immediately; file handles that are
+already open continue to work until they are closed.
 
 ### `edit`
 

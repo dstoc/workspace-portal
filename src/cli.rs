@@ -7,7 +7,6 @@ use crate::{
         self, AddArgs, CheckArgs, EditArgs, ListArgs, RemoveArgs, StartArgs, StatusArgs, StopArgs,
     },
     error::{Error, Result},
-    state::RevocationMode,
 };
 
 #[derive(Debug, Parser)]
@@ -101,18 +100,6 @@ pub struct AddCommand {
     #[arg(long, help = "Replace an existing entry with the same name")]
     pub replace: bool,
 
-    #[arg(
-        long = "follow-symlinks",
-        help = "Resolve symlink targets before adding the entry"
-    )]
-    pub follow_symlinks: bool,
-
-    #[arg(
-        long = "no-follow-symlinks",
-        help = "Preserve symlinks instead of resolving them"
-    )]
-    pub no_follow_symlinks: bool,
-
     #[arg(long, help = "Deprecated alias for the mount-point name")]
     pub name: Option<String>,
 }
@@ -127,12 +114,6 @@ pub struct RmCommand {
         help = "Override workspace discovery with an explicit workspace path"
     )]
     pub workspace: Option<PathBuf>,
-
-    #[arg(long, help = "Request hard revocation semantics where supported")]
-    pub hard: bool,
-
-    #[arg(long, help = "Use soft revocation behavior")]
-    pub soft: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -214,21 +195,13 @@ pub async fn run() -> Result<()> {
                 read_only: cmd.ro,
                 read_write: cmd.rw,
                 replace: cmd.replace,
-                follow_symlinks: cmd.follow_symlinks,
-                no_follow_symlinks: cmd.no_follow_symlinks,
             })
             .await
         }
         Commands::Rm(cmd) => {
-            validate_rm(&cmd)?;
             daemon::remove(RemoveArgs {
                 workspace: cmd.workspace,
                 mount_point: cmd.mount_point,
-                revocation: if cmd.hard {
-                    RevocationMode::Hard
-                } else {
-                    RevocationMode::Soft
-                },
             })
             .await
         }
@@ -276,20 +249,6 @@ fn validate_start(cmd: &StartCommand) -> Result<()> {
 fn validate_add(cmd: &AddCommand) -> Result<()> {
     if cmd.ro && cmd.rw {
         return Err(Error::Cli("choose either --ro or --rw".to_owned()));
-    }
-
-    if cmd.follow_symlinks && cmd.no_follow_symlinks {
-        return Err(Error::Cli(
-            "choose either --follow-symlinks or --no-follow-symlinks".to_owned(),
-        ));
-    }
-
-    Ok(())
-}
-
-fn validate_rm(cmd: &RmCommand) -> Result<()> {
-    if cmd.hard && cmd.soft {
-        return Err(Error::Cli("choose either --hard or --soft".to_owned()));
     }
 
     Ok(())

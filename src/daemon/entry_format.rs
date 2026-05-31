@@ -5,7 +5,7 @@ use crate::{
     error::{Error, Result},
     paths,
     protocol::{ControlRequest, EntryState},
-    state::{AccessMode, RevocationMode},
+    state::AccessMode,
 };
 
 /// Render a slice of entries into a column-aligned table.
@@ -163,7 +163,7 @@ pub(crate) fn validate_entries(entries: &[EntryState]) -> Result<()> {
 /// `ControlRequest`s needed to bring the daemon from `before` to `after`.
 ///
 /// - Added entries or entries with changed target/mode → `Add { replace: true }`
-/// - Entries removed from `after` → `Remove { revocation: Soft }`
+/// - Entries removed from `after` → `Remove`
 /// - Unchanged entries → no request
 ///
 /// Adds are emitted in `after` order; Removes in `before` order.
@@ -206,7 +206,6 @@ pub(crate) fn plan_edit(before: &[EntryState], after: &[EntryState]) -> Vec<Cont
         if !after_names.contains(entry.name.as_str()) {
             requests.push(ControlRequest::Remove {
                 name: entry.name.clone(),
-                revocation: RevocationMode::Soft,
             });
         }
     }
@@ -242,7 +241,6 @@ fn parse_mode(token: &str, raw_line: &str) -> Result<AccessMode> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::RevocationMode;
 
     fn entry(name: &str, target: &str, mode: AccessMode) -> EntryState {
         EntryState {
@@ -295,8 +293,8 @@ mod tests {
         let removes: Vec<_> = requests
             .iter()
             .filter_map(|r| {
-                if let ControlRequest::Remove { name, revocation } = r {
-                    Some((name.as_str(), *revocation))
+                if let ControlRequest::Remove { name } = r {
+                    Some(name.as_str())
                 } else {
                     None
                 }
@@ -316,15 +314,11 @@ mod tests {
             && *r));
         // unchanged produces no Add.
         assert!(!adds.iter().any(|(n, _, _, _)| *n == "unchanged"));
-        // dropped produces a Remove{Soft}.
-        assert!(
-            removes
-                .iter()
-                .any(|(n, rev)| *n == "dropped" && *rev == RevocationMode::Soft)
-        );
+        // dropped produces a Remove.
+        assert!(removes.iter().any(|n| *n == "dropped"));
         // no Remove for anything still present.
-        assert!(!removes.iter().any(|(n, _)| *n == "unchanged"));
-        assert!(!removes.iter().any(|(n, _)| *n == "new_entry"));
+        assert!(!removes.iter().any(|n| *n == "unchanged"));
+        assert!(!removes.iter().any(|n| *n == "new_entry"));
     }
 
     #[test]

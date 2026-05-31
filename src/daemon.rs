@@ -18,7 +18,7 @@ use crate::{
     error::{Error, Result},
     paths,
     protocol::{self, ControlRequest, ControlResponse, EntryState, StatusPayload},
-    state::{AccessMode, DaemonStatus, RevocationMode},
+    state::{AccessMode, DaemonStatus},
 };
 
 use self::{
@@ -54,15 +54,12 @@ pub struct AddArgs {
     pub read_only: bool,
     pub read_write: bool,
     pub replace: bool,
-    pub follow_symlinks: bool,
-    pub no_follow_symlinks: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct RemoveArgs {
     pub workspace: Option<PathBuf>,
     pub mount_point: String,
-    pub revocation: RevocationMode,
 }
 
 #[derive(Debug, Clone)]
@@ -207,7 +204,6 @@ pub async fn remove(args: RemoveArgs) -> Result<()> {
     let mount_point = args.mount_point.clone();
     let request = ControlRequest::Remove {
         name: mount_point.clone(),
-        revocation: args.revocation,
     };
     match send_request(&ctx.socket, &request) {
         Ok(response) => ensure_response_ok(response),

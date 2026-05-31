@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::state::{AccessMode, DaemonStatus, EntryRecord, RevocationMode, WorkspaceSnapshot};
+use crate::state::{AccessMode, DaemonStatus, EntryRecord, WorkspaceSnapshot};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -15,7 +15,6 @@ pub enum ControlRequest {
     },
     Remove {
         name: String,
-        revocation: RevocationMode,
     },
     Status,
     Stop,

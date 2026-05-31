@@ -54,19 +54,6 @@ impl<'de> Deserialize<'de> for AccessMode {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum RevocationMode {
-    Soft,
-    Hard,
-}
-
-impl Default for RevocationMode {
-    fn default() -> Self {
-        Self::Soft
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
 pub enum DaemonStatus {
     Running,
     Stopped,

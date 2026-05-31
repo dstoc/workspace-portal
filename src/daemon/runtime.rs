@@ -158,7 +158,7 @@ impl Daemon {
                     message: format!("added {name}"),
                 })
             }
-            ControlRequest::Remove { name, revocation } => {
+            ControlRequest::Remove { name } => {
                 paths::validate_entry_name(&name)?;
                 let removed = {
                     let mut state = self.state.write().unwrap();
@@ -166,7 +166,7 @@ impl Daemon {
                 };
                 self.persist_state()?;
                 Ok(ControlResponse::Ack {
-                    message: format!("removed {} ({revocation:?})", removed.name),
+                    message: format!("removed {}", removed.name),
                 })
             }
             ControlRequest::Stop => {
