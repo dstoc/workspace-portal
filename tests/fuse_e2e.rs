@@ -1437,6 +1437,87 @@ fn fuse_e2e_edit_rw_to_ro_preserves_held_write_handle() -> Result<(), Box<dyn Er
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Backing-store TOCTOU confinement (see docs/proposals/symlink-confinement.md).
+//
+// The daemon must never resolve a host path outside the entry target, even if
+// the backing store is mutated after an inode is cached. The reachable trigger
+// is an *already-open* handle: the daemon serves it by cached inode without a
+// fresh per-component lookup, so it rebuilds `entry.target.join(relative)` and
+// follows whatever an intermediate component now points at.
+//
+// The probe is `fstat` on a held *file* handle. `getattr` (src/fs/callbacks.rs)
+// ignores the file handle and re-derives the host path from the cached inode,
+// then `lstat`s it; with `TTL = 0` every `fstat` re-queries the daemon, so no
+// kernel cache sits in front of it. (A `readdir` probe is unreliable here: the
+// kernel issues a readahead READDIR at opendir time, before the swap, and then
+// serves the iterator from that pre-swap cache.) Contents cannot leak through
+// the held fd — it was opened pre-swap against the real in-entry file — so this
+// asserts on the *metadata* the daemon serves: the size of a file that lives
+// OUTSIDE the entry must never be reported through the entry.
+//
+// EXPECTED: fails against current code (getattr follows the swapped `sub` and
+// returns the outside file's size) and passes once daemon-side resolution is
+// confined beneath the entry root.
+// ---------------------------------------------------------------------------
+#[test]
+#[ignore]
+#[cfg(unix)]
+fn fuse_e2e_backing_store_swap_stays_confined_to_entry() -> Result<(), Box<dyn Error>> {
+    require_fuse_prerequisites();
+
+    let fixture = Fixture::new();
+    start_rw_workspace(&fixture);
+
+    // A directory OUTSIDE the entry target (a sibling of docs_target, so the
+    // test works within a single namespace). It holds a file with the same
+    // basename as the in-entry probe but a deliberately distinct size, so that
+    // metadata served from inside vs. outside the entry is unambiguous.
+    const OUTSIDE_CONTENTS: &str = "LEAKED-FROM-OUTSIDE-THE-ENTRY-TARGET";
+    let outside = fixture.root.join("outside-secret");
+    fs::create_dir_all(&outside)?;
+    fs::write(outside.join("probe"), OUTSIDE_CONTENTS)?;
+
+    // A real subdirectory inside the entry, containing the probe file.
+    let host_sub = fixture.docs_target.join("sub");
+    fs::create_dir_all(&host_sub)?;
+    fs::write(host_sub.join("probe"), "in")?; // 2 bytes, != OUTSIDE_CONTENTS.len()
+
+    // Open and HOLD a file handle to docs/sub/probe through the mount. This
+    // makes the daemon cache the inode for `/docs/sub/probe`; the held fd keeps
+    // the kernel from forgetting it.
+    let mounted_probe = fixture.workspace.join("docs/sub/probe");
+    let held = OpenOptions::new().read(true).open(&mounted_probe)?;
+
+    // TOCTOU: after the handle is open, replace the backing `sub` directory with
+    // a symlink that escapes the entry target.
+    fs::remove_dir_all(&host_sub)?;
+    symlink(&outside, &host_sub)?;
+
+    // fstat the held handle. On vulnerable code the daemon re-derives
+    // `docs_target/"sub"/"probe"`, follows the swapped `sub` symlink, and
+    // returns `outside/probe`'s metadata. A confined daemon either errors
+    // (EXDEV) or still reports the in-entry file — both acceptable; only the
+    // outside size must never be served.
+    let leaked_size = held.metadata().map(|m| m.len()).unwrap_or(0);
+    assert_ne!(
+        leaked_size,
+        OUTSIDE_CONTENTS.len() as u64,
+        "confinement breach: getattr on a held handle returned metadata for a \
+         file OUTSIDE the entry target after a backing-store symlink swap \
+         (reported size {leaked_size} == outside file size)"
+    );
+
+    let stop = run(
+        &["stop", "--workspace", &fixture.workspace_arg()],
+        &fixture.envs(),
+    );
+    assert!(stop.status.success(), "{}", output_text(&stop));
+    wait_for_mounted_state(&fixture, false);
+
+    Ok(())
+}
+
 #[test]
 #[ignore]
 fn fuse_e2e_edit_unchanged_buffer_reports_no_changes() -> Result<(), Box<dyn Error>> {
