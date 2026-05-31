@@ -142,13 +142,31 @@ pub async fn start(args: StartArgs) -> Result<()> {
         return Ok(());
     }
 
+    let socket_path = workspace_ctx.socket.clone();
     let daemon = Daemon::new(DaemonConfig {
         state,
         state_path: workspace_ctx.state_path.clone(),
         registry_path: workspace_ctx.registry_path.clone(),
         allow_other: args.allow_other,
     });
-    daemon.run()
+
+    let mut join_handle = tokio::task::spawn_blocking(move || daemon.run());
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .map_err(Error::Io)?;
+
+    tokio::select! {
+        result = &mut join_handle => return result.map_err(|e| Error::Cli(e.to_string()))?,
+        _ = tokio::signal::ctrl_c() => {}
+        _ = sigterm.recv() => {}
+    }
+
+    let sock = socket_path;
+    tokio::task::spawn_blocking(move || {
+        let _ = send_request(&sock, &ControlRequest::Stop);
+    })
+    .await
+    .ok();
+    join_handle.await.map_err(|e| Error::Cli(e.to_string()))?
 }
 
 pub async fn add(args: AddArgs) -> Result<()> {
