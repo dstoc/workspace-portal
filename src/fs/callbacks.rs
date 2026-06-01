@@ -1343,10 +1343,13 @@ impl Filesystem for PortalFs {
     fn statfs(&self, _req: &Request, ino: INodeNo, reply: ReplyStatfs) {
         let state = self.state.read().unwrap().clone();
 
-        // Measure the filesystem backing the queried inode: root inode → workspace
-        // dir; otherwise the entry target, resolved confined beneath the entry.
+        // Measure the filesystem backing the queried inode. The root is a virtual
+        // union with no single backing store, and `state.workspace` is *this*
+        // mountpoint, so statvfs-ing it would re-enter the (single-threaded) FUSE
+        // session and deadlock. Measure the directory hosting the mount instead;
+        // for other inodes, the entry target resolved confined beneath the entry.
         let measured = if ino == ROOT_INO {
-            statvfs_for(&state.workspace)
+            state.workspace.parent().and_then(statvfs_for)
         } else {
             let mut runtime = self.runtime.lock().unwrap();
             let resolved = runtime
@@ -1360,8 +1363,9 @@ impl Filesystem for PortalFs {
             }
         };
 
-        // Fall back to the workspace, then to hardcoded values.
-        let buf = measured.or_else(|| statvfs_for(&state.workspace));
+        // Fall back to the directory hosting the mount, then to hardcoded values.
+        // Never statvfs the mountpoint itself (see above): it would deadlock.
+        let buf = measured.or_else(|| state.workspace.parent().and_then(statvfs_for));
 
         match buf {
             Some(buf) => {
