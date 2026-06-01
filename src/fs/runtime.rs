@@ -30,6 +30,11 @@ pub(crate) struct OpenHandle {
 pub(crate) struct FuseRuntime {
     pub(crate) inode_paths: BTreeMap<u64, PortalPath>,
     pub(crate) path_inodes: HashMap<PortalPath, u64>,
+    /// Outstanding kernel lookup count per inode. The FUSE protocol increments
+    /// this by one for every reply that returns an inode to the kernel (LOOKUP,
+    /// CREATE, MKDIR, SYMLINK, LINK) and FORGET decrements it by `nlookup`. An
+    /// inode mapping must only be dropped once its count reaches zero.
+    pub(crate) lookups: HashMap<u64, u64>,
     pub(crate) handles: BTreeMap<u64, OpenHandle>,
     pub(crate) next_inode: u64,
     pub(crate) next_handle: u64,
@@ -45,6 +50,7 @@ impl FuseRuntime {
         Self {
             inode_paths,
             path_inodes,
+            lookups: HashMap::new(),
             handles: BTreeMap::new(),
             next_inode: ROOT_INO.0 + 1,
             next_handle: 1,
@@ -94,14 +100,52 @@ impl FuseRuntime {
         })
     }
 
+    /// Ensures an inode exists for `path` without touching its lookup count.
+    ///
+    /// Used for inodes that are cached but *not* handed to the kernel as a new
+    /// lookup reference (plain `readdir` entries, `getattr` re-resolution). Use
+    /// [`remember_lookup`](Self::remember_lookup) for replies that the kernel
+    /// counts as a lookup.
     pub(crate) fn cache_portal_path(&mut self, path: PortalPath) -> INodeNo {
         self.inode_for_path(path)
     }
 
-    pub(crate) fn forget_inode(&mut self, ino: INodeNo) {
+    /// Resolves the inode for `path` and records one outstanding kernel lookup
+    /// reference for it. Call this for every reply that returns an inode to the
+    /// kernel (LOOKUP, CREATE, MKDIR, SYMLINK, LINK); the matching FORGET will
+    /// release the reference.
+    pub(crate) fn remember_lookup(&mut self, path: PortalPath) -> INodeNo {
+        let ino = self.inode_for_path(path);
+        if ino != ROOT_INO {
+            *self.lookups.entry(ino.0).or_insert(0) += 1;
+        }
+        ino
+    }
+
+    /// Releases `nlookup` kernel lookup references for `ino`, dropping the
+    /// cached mapping only once the count reaches zero. Honouring `nlookup` is
+    /// required by the FUSE protocol: a single FORGET may release several
+    /// references at once, and the kernel may keep using an inode whose count
+    /// is still positive. Dropping it early makes later operations against it
+    /// (e.g. `create` of a lock file under a forgotten directory) fail.
+    pub(crate) fn forget_inode(&mut self, ino: INodeNo, nlookup: u64) {
         if ino == ROOT_INO {
             return;
         }
+
+        match self.lookups.get_mut(&ino.0) {
+            Some(count) => {
+                *count = count.saturating_sub(nlookup);
+                if *count > 0 {
+                    return;
+                }
+                self.lookups.remove(&ino.0);
+            }
+            // No tracked lookups: the kernel holds no outstanding reference, so
+            // releasing any cached mapping is safe.
+            None => {}
+        }
+
         if let Some(path) = self.inode_paths.remove(&ino.0) {
             self.path_inodes.remove(&path);
         }
@@ -127,6 +171,7 @@ impl FuseRuntime {
         for (ino, old_path) in stale_destination_paths {
             self.inode_paths.remove(&ino);
             self.path_inodes.remove(&old_path);
+            self.lookups.remove(&ino);
         }
 
         for (ino, new_path) in renamed {
@@ -371,6 +416,69 @@ mod tests {
                 name: "docs".to_owned(),
                 relative: PathBuf::from("new/nested/file.txt"),
             })
+        );
+    }
+
+    // Deterministic reproduction of the `git push` lock-create regression.
+    //
+    // The FUSE protocol reference-counts inodes: every LOOKUP reply (and
+    // CREATE/MKDIR/etc. that returns an inode) increments the kernel's lookup
+    // count by one, and FORGET carries an `nlookup` that decrements it. The
+    // daemon must only drop an inode once its cumulative lookup count reaches
+    // zero. `forget` (src/fs/callbacks.rs) instead drops the mapping on the
+    // first FORGET regardless of `nlookup`, so an inode the kernel still
+    // references gets evicted early. Because `path_for_inode` cannot re-derive
+    // a *nested* path (only top-level entry inodes), a later operation against
+    // that inode — e.g. `create` of `refs/remotes/origin/main.lock` — fails
+    // with EACCES even though the entry is read-write.
+    //
+    // This exercises the inode table directly (no real mount), so it is not
+    // subject to the kernel's nondeterministic FORGET scheduling that makes an
+    // end-to-end `git push` reproduction flaky.
+    #[test]
+    fn forget_honours_lookup_count_for_nested_inode() {
+        let mut runtime = FuseRuntime::new();
+
+        // `path_for_inode` consults `state` only when re-deriving a top-level
+        // entry inode; a cached nested inode never reaches that branch, so an
+        // empty state is sufficient here.
+        let workspace = PathBuf::from("/tmp/workspace-portal-forget-refcount");
+        let state = PortalState::new(
+            workspace.clone(),
+            "test-workspace-id".to_owned(),
+            workspace.join("socket.sock"),
+        );
+
+        // A nested directory inode, e.g. `.git/refs/remotes/origin`.
+        let nested = PortalPath::Entry {
+            name: "docs".to_owned(),
+            relative: PathBuf::from(".git/refs/remotes/origin"),
+        };
+
+        // The kernel looks the directory up twice — say, once while reading
+        // existing refs and again while preparing to create `main.lock` under
+        // it. Each LOOKUP reply increments the lookup count, so it is now 2.
+        let ino = runtime.remember_lookup(nested.clone());
+        let ino_again = runtime.remember_lookup(nested.clone());
+        assert_eq!(ino, ino_again, "the same path must map to the same inode");
+
+        // The kernel forgets ONE of those two references (nlookup = 1). The
+        // count drops 2 -> 1; the inode is still referenced and the kernel may
+        // still issue a CREATE against it, so the daemon must keep resolving it.
+        runtime.forget_inode(ino, 1);
+        assert!(
+            runtime.path_for_inode(&state, ino).is_some(),
+            "a nested inode forgotten fewer times than it was looked up must \
+             still resolve; dropping it early makes the next operation against \
+             it (create of refs/remotes/origin/main.lock) fail with EACCES"
+        );
+
+        // After the matching second forget the count reaches 0 and the inode
+        // may be evicted.
+        runtime.forget_inode(ino, 1);
+        assert!(
+            runtime.path_for_inode(&state, ino).is_none(),
+            "once the lookup count reaches zero the nested inode should be dropped"
         );
     }
 }

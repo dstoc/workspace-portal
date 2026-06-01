@@ -229,7 +229,7 @@ impl Filesystem for PortalFs {
                 name: entry.name.clone(),
                 relative: std::path::PathBuf::new(),
             };
-            let ino = runtime.cache_portal_path(path);
+            let ino = runtime.remember_lookup(path);
             let metadata = match safe_open::lstat(&entry.target, Path::new("")) {
                 Ok(metadata) => metadata,
                 Err(_) => {
@@ -303,7 +303,7 @@ impl Filesystem for PortalFs {
                 return;
             }
         };
-        let ino = runtime.cache_portal_path(child_path.clone());
+        let ino = runtime.remember_lookup(child_path.clone());
         let attr = attr_from_metadata(
             ino,
             &metadata,
@@ -320,7 +320,7 @@ impl Filesystem for PortalFs {
     fn forget(&self, _req: &Request, ino: INodeNo, nlookup: u64) {
         debug!("forget ino={} nlookup={}", ino.0, nlookup);
         let mut runtime = self.runtime.lock().unwrap();
-        runtime.forget_inode(ino);
+        runtime.forget_inode(ino, nlookup);
     }
 
     fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
@@ -658,7 +658,7 @@ impl Filesystem for PortalFs {
             ((mode & !umask) & 0o7777) as libc::mode_t,
         ) {
             Ok(file) => {
-                let ino = runtime.cache_portal_path(path.clone());
+                let ino = runtime.remember_lookup(path.clone());
                 let fh = runtime.handle_file(ino, file, OpenHandleKind::File, true);
                 let metadata = match safe_open::lstat(&resolved.entry.target, &resolved.relative) {
                     Ok(metadata) => metadata,
@@ -725,7 +725,7 @@ impl Filesystem for PortalFs {
                         return;
                     }
                 };
-                let ino = runtime.cache_portal_path(path);
+                let ino = runtime.remember_lookup(path);
                 let attr = attr_from_metadata(
                     ino,
                     &metadata,
@@ -769,7 +769,7 @@ impl Filesystem for PortalFs {
                         return;
                     }
                 };
-                let ino = runtime.cache_portal_path(path);
+                let ino = runtime.remember_lookup(path);
                 let attr = attr_from_metadata(
                     ino,
                     &metadata,
@@ -1009,7 +1009,7 @@ impl Filesystem for PortalFs {
                         return;
                     }
                 };
-                let ino = runtime.cache_portal_path(target_path);
+                let ino = runtime.remember_lookup(target_path);
                 let attr = attr_from_metadata(
                     ino,
                     &metadata,
