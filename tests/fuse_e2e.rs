@@ -12,6 +12,9 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, symlink};
 
+#[cfg(unix)]
+use libc;
+
 use serde_json::Value;
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
@@ -1556,6 +1559,133 @@ fn fuse_e2e_edit_unchanged_buffer_reports_no_changes() -> Result<(), Box<dyn Err
         "docs entry mode must remain 'rw' after no-op edit"
     );
 
+    let stop = run(
+        &["stop", "--workspace", &fixture.workspace_arg()],
+        &fixture.envs(),
+    );
+    assert!(stop.status.success(), "{}", output_text(&stop));
+    wait_for_mounted_state(&fixture, false);
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Helper: start a workspace with `--allow-other` (mirrors `start_workspace`).
+// ---------------------------------------------------------------------------
+fn start_workspace_allow_other(fixture: &Fixture) {
+    let start = run(
+        &["start", &fixture.workspace_arg(), "--bg", "--allow-other"],
+        &fixture.envs(),
+    );
+    assert!(start.status.success(), "{}", output_text(&start));
+    wait_for_mounted_state(fixture, true);
+}
+
+// ---------------------------------------------------------------------------
+// Verify that `default_permissions` is enforced when `--allow-other` is used.
+//
+// Verification steps from docs/proposals/default-permissions-with-allow-other.md:
+//   1. Start with --allow-other; expose a directory with a 0600 file owned by
+//      the daemon uid.
+//   2. As a different uid, attempt to read the file through the mount; must fail
+//      with EACCES.
+//   3. As the owner, confirm the same read still succeeds.
+//
+// When the test cannot arrange a second uid (running as non-root), the cross-uid
+// denial check is skipped and a clear message is printed; the owner-positive path
+// is still exercised.
+// ---------------------------------------------------------------------------
+#[test]
+#[ignore]
+#[cfg(unix)]
+fn fuse_e2e_allow_other_enforces_file_permissions() -> Result<(), Box<dyn Error>> {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::CommandExt;
+
+    require_fuse_prerequisites();
+
+    let fixture = Fixture::new();
+
+    // Step 1: create a 0600 file in docs_target owned by the current (daemon) uid.
+    let secret_path = fixture.docs_target.join("secret.txt");
+    fs::write(&secret_path, "owner-only-content")?;
+    fs::set_permissions(&secret_path, Permissions::from_mode(0o600))?;
+
+    // Start the workspace with --allow-other and add docs as a read-only entry.
+    start_workspace_allow_other(&fixture);
+
+    let add = run(
+        &[
+            "add",
+            &fixture.docs_target_arg(),
+            "docs",
+            "--workspace",
+            &fixture.workspace_arg(),
+        ],
+        &fixture.envs(),
+    );
+    assert!(add.status.success(), "{}", output_text(&add));
+
+    // Wait until the docs entry is visible in the mount.
+    assert!(
+        wait_for(Duration::from_secs(5), || fixture
+            .workspace
+            .join("docs")
+            .exists()),
+        "docs entry never appeared in the mounted workspace"
+    );
+
+    let mounted_secret = fixture.workspace.join("docs/secret.txt");
+
+    // Step 2: cross-uid denial check — only possible when running as uid 0.
+    let running_as_root = unsafe { libc::getuid() } == 0;
+
+    if !running_as_root {
+        println!(
+            "skipping cross-uid denial check: not running as root \
+             (uid {}); cannot drop to an unprivileged uid",
+            unsafe { libc::getuid() }
+        );
+    } else {
+        // Attempt to read the 0600 file through the mount as uid 65534 (nobody).
+        // We spawn a child `cat` process with a different uid. The read must be
+        // denied by the kernel (EACCES) because `default_permissions` is active.
+        let deny_check = Command::new("cat")
+            .arg(&mounted_secret)
+            // Safety: uid() closure runs in the child between fork and exec.
+            .uid(65534)
+            .output()?;
+
+        assert!(
+            !deny_check.status.success(),
+            "step 2: unprivileged uid 65534 read through mount should have been \
+             denied (EACCES), but cat exited successfully"
+        );
+
+        let deny_stderr = String::from_utf8_lossy(&deny_check.stderr).to_ascii_lowercase();
+        assert!(
+            deny_stderr.contains("permission denied"),
+            "step 2: expected 'permission denied' in cat stderr for unprivileged read, \
+             got: {deny_stderr}"
+        );
+    }
+
+    // Step 3: owner-positive path — the current uid must still be able to read
+    // the 0600 file through the mount.
+    let owner_read = fs::read_to_string(&mounted_secret);
+    assert!(
+        owner_read.is_ok(),
+        "step 3: owner read through the mount should succeed, got: {:?}",
+        owner_read.unwrap_err()
+    );
+    assert_eq!(
+        owner_read.unwrap(),
+        "owner-only-content",
+        "step 3: owner read returned unexpected content"
+    );
+
+    // Teardown — Fixture::drop handles unmounting, but we stop explicitly so
+    // the test is self-contained and failures are surfaced cleanly.
     let stop = run(
         &["stop", "--workspace", &fixture.workspace_arg()],
         &fixture.envs(),

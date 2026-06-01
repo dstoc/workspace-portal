@@ -129,6 +129,9 @@ impl PortalFs {
             .push(MountOption::FSName("workspace-portal".to_owned()));
         if allow_other {
             config.acl = SessionACL::All;
+            config
+                .mount_options
+                .push(MountOption::DefaultPermissions);
         }
         Ok(fuser::spawn_mount2(self, mountpoint, &config)?)
     }
