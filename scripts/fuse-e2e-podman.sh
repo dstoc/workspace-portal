@@ -40,15 +40,22 @@ if (($#)); then
   extra_test_args=("$@")
 fi
 
-cargo_args=(test --offline --locked --test fuse_e2e -- --ignored --test-threads=1 "${extra_test_args[@]}")
+pass_args=()
+if ((${#extra_test_args[@]})); then
+  pass_args=(-- "${extra_test_args[@]}")
+fi
 
 "$podman" build -f "$containerfile" -t "$image_name" "$repo_root"
 
 echo "==> Running FUSE E2E suite in Podman"
+# Network is disabled in the container, so cargo must run offline against the
+# dependencies fetched at image build time. The shared script drives the actual
+# cargo invocation; CARGO_NET_OFFLINE replaces the previous hard-coded --offline.
 "$podman" run --rm \
   --device /dev/fuse \
   --cap-add SYS_ADMIN \
   --network none \
+  -e CARGO_NET_OFFLINE=true \
   -w /workspace \
   "$image_name" \
-  cargo "${cargo_args[@]}"
+  bash scripts/fuse-e2e.sh "${pass_args[@]}"
