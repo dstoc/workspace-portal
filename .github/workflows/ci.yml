@@ -46,14 +46,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # The #[ignore]d FUSE end-to-end suite needs a real /dev/fuse and the
-      # setuid fusermount3 helper. ubuntu-latest provides /dev/fuse and allows
-      # the runner user to mount FUSE, so the suite runs directly on the host;
-      # fuse3 supplies fusermount3. scripts/fuse-e2e.sh is the same entry point
-      # used locally (and inside the Podman harness).
-      - name: Install fuse3
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y fuse3
+      - name: Enable user_allow_other
+        run: echo 'user_allow_other' | sudo tee -a /etc/fuse.conf
       - name: FUSE e2e
         run: bash scripts/fuse-e2e.sh
