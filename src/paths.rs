@@ -50,12 +50,11 @@ fn discover_workspace_in(start: impl AsRef<Path>, state_root: impl AsRef<Path>) 
     loop {
         let workspace_id = workspace_id(&current);
         let registry_path = state_file_path_in(&state_root, &workspace_id);
-        if registry_path.exists() {
-            if let Ok(state) = PortalState::load_from_path(&registry_path) {
-                if state.workspace == current {
-                    return Ok(current);
-                }
-            }
+        if registry_path.exists()
+            && let Ok(state) = PortalState::load_from_path(&registry_path)
+            && state.workspace == current
+        {
+            return Ok(current);
         }
 
         if !current.pop() {

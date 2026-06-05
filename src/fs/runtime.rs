@@ -133,17 +133,14 @@ impl FuseRuntime {
             return;
         }
 
-        match self.lookups.get_mut(&ino.0) {
-            Some(count) => {
-                *count = count.saturating_sub(nlookup);
-                if *count > 0 {
-                    return;
-                }
-                self.lookups.remove(&ino.0);
+        // No tracked lookups: the kernel holds no outstanding reference, so
+        // releasing any cached mapping is safe.
+        if let Some(count) = self.lookups.get_mut(&ino.0) {
+            *count = count.saturating_sub(nlookup);
+            if *count > 0 {
+                return;
             }
-            // No tracked lookups: the kernel holds no outstanding reference, so
-            // releasing any cached mapping is safe.
-            None => {}
+            self.lookups.remove(&ino.0);
         }
 
         if let Some(path) = self.inode_paths.remove(&ino.0) {

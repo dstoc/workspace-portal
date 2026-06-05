@@ -13,8 +13,6 @@ use std::{
 use std::os::unix::fs::{FileTypeExt, symlink};
 
 #[cfg(unix)]
-use libc;
-
 use serde_json::Value;
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
@@ -66,10 +64,10 @@ fn dev_fuse_available() -> bool {
     #[cfg(target_os = "linux")]
     {
         let fuse_device = Path::new("/dev/fuse");
-        return fuse_device.exists()
+        fuse_device.exists()
             && fs::metadata(fuse_device)
                 .map(|m| m.file_type().is_char_device())
-                .unwrap_or(false);
+                .unwrap_or(false)
     }
 
     #[cfg(not(target_os = "linux"))]

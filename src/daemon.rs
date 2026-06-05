@@ -332,7 +332,7 @@ pub async fn list(_args: ListArgs) -> Result<()> {
     }
 
     rows.sort_by(|left, right| left.0.cmp(&right.0));
-    println!("{:<38} {:<8} {}", "WORKSPACE", "STATUS", "ENTRIES");
+    println!("{:<38} {:<8} ENTRIES", "WORKSPACE", "STATUS");
     for (workspace, status, entries, error) in rows {
         if let Some(error) = error {
             println!(
@@ -493,10 +493,10 @@ pub async fn edit(args: EditArgs) -> Result<()> {
             Err(err) => {
                 // If bytes are unchanged from the previous failed iteration → give up.
                 // (main prints the returned error, so don't echo it here.)
-                if let Some(ref prev) = prev_bytes {
-                    if current_bytes == *prev {
-                        return Err(err);
-                    }
+                if let Some(ref prev) = prev_bytes
+                    && current_bytes == *prev
+                {
+                    return Err(err);
                 }
                 eprintln!("{err}");
                 eprintln!("(The buffer will be reopened for further editing.)");

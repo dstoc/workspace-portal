@@ -315,10 +315,10 @@ mod tests {
         // unchanged produces no Add.
         assert!(!adds.iter().any(|(n, _, _, _)| *n == "unchanged"));
         // dropped produces a Remove.
-        assert!(removes.iter().any(|n| *n == "dropped"));
+        assert!(removes.contains(&"dropped"));
         // no Remove for anything still present.
-        assert!(!removes.iter().any(|n| *n == "unchanged"));
-        assert!(!removes.iter().any(|n| *n == "new_entry"));
+        assert!(!removes.contains(&"unchanged"));
+        assert!(!removes.contains(&"new_entry"));
     }
 
     #[test]

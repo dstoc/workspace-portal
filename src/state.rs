@@ -12,16 +12,11 @@ use crate::{
     paths,
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
 pub enum AccessMode {
     ReadOnly,
+    #[default]
     ReadWrite,
-}
-
-impl Default for AccessMode {
-    fn default() -> Self {
-        Self::ReadWrite
-    }
 }
 
 impl Serialize for AccessMode {
@@ -54,16 +49,12 @@ impl<'de> Deserialize<'de> for AccessMode {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum DaemonStatus {
     Running,
     Stopped,
+    #[default]
     Unknown,
-}
-
-impl Default for DaemonStatus {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

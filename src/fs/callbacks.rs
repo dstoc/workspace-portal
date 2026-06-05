@@ -117,7 +117,11 @@ fn open_path(
         }
     }
 
-    let mut oflags = if writable { libc::O_RDWR } else { libc::O_RDONLY };
+    let mut oflags = if writable {
+        libc::O_RDWR
+    } else {
+        libc::O_RDONLY
+    };
     if flags & libc::O_APPEND != 0 {
         oflags |= libc::O_APPEND;
     }
@@ -188,14 +192,13 @@ fn timeornow_to_timespec(value: Option<TimeOrNow>) -> libc::timespec {
                     let d = e.duration();
                     let nanos = d.subsec_nanos();
                     let mut tv_sec = -(d.as_secs() as libc::time_t);
-                    let tv_nsec: libc::c_long;
-                    if nanos == 0 {
-                        tv_nsec = 0;
+                    let tv_nsec: libc::c_long = if nanos == 0 {
+                        0
                     } else {
                         // Borrow 1 second so tv_nsec stays positive.
                         tv_sec -= 1;
-                        tv_nsec = (1_000_000_000 - nanos) as libc::c_long;
-                    }
+                        (1_000_000_000 - nanos) as libc::c_long
+                    };
                     libc::timespec { tv_sec, tv_nsec }
                 }
             }
@@ -356,16 +359,16 @@ impl Filesystem for PortalFs {
                 // For soft revocation: the entry was removed but an open fd remains.
                 // Serve attributes via fstat on the open handle so the kernel does not
                 // abort in-flight reads with ENOENT.
-                if matches!(&err, Error::EntryNotFound(_) | Error::TargetNotFound(_)) {
-                    if let Some(metadata) = runtime.open_handle_metadata(ino) {
-                        let attr = attr_from_metadata(ino, &metadata, false, 0);
-                        debug!(
-                            "getattr ino={} path={:?} -> ok (revoked, fstat fallback)",
-                            ino.0, path
-                        );
-                        reply.attr(&TTL, &attr);
-                        return;
-                    }
+                if matches!(&err, Error::EntryNotFound(_) | Error::TargetNotFound(_))
+                    && let Some(metadata) = runtime.open_handle_metadata(ino)
+                {
+                    let attr = attr_from_metadata(ino, &metadata, false, 0);
+                    debug!(
+                        "getattr ino={} path={:?} -> ok (revoked, fstat fallback)",
+                        ino.0, path
+                    );
+                    reply.attr(&TTL, &attr);
+                    return;
                 }
                 debug!(
                     "getattr ino={} path={:?} -> errno={:?} err={}",
@@ -420,15 +423,15 @@ impl Filesystem for PortalFs {
             return;
         }
 
-        if let Some(mode) = mode {
-            if let Err(err) = safe_open::chmod(
+        if let Some(mode) = mode
+            && let Err(err) = safe_open::chmod(
                 &resolved.entry.target,
                 &resolved.relative,
                 (mode & 0o7777) as libc::mode_t,
-            ) {
-                reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO)));
-                return;
-            }
+            )
+        {
+            reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO)));
+            return;
         }
 
         if let Some(size) = size {
@@ -1375,11 +1378,11 @@ impl Filesystem for PortalFs {
                     buf.f_namemax as u32
                 };
                 reply.statfs(
-                    buf.f_blocks as u64,
-                    buf.f_bfree as u64,
-                    buf.f_bavail as u64,
-                    buf.f_files as u64,
-                    buf.f_ffree as u64,
+                    buf.f_blocks,
+                    buf.f_bfree,
+                    buf.f_bavail,
+                    buf.f_files,
+                    buf.f_ffree,
                     buf.f_bsize as u32,
                     namelen,
                     buf.f_frsize as u32,

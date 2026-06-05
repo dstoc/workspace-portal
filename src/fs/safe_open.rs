@@ -114,7 +114,8 @@ fn open_parent(entry_root: &Path, relative: &Path) -> io::Result<(OwnedFd, CStri
     let parent = relative.parent().unwrap_or_else(|| Path::new(""));
     let root = open_root(entry_root)?;
     let parent_fd = openat2_beneath(&root, parent, libc::O_PATH | libc::O_DIRECTORY, 0)?;
-    let leaf = CString::new(leaf.as_bytes()).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+    let leaf =
+        CString::new(leaf.as_bytes()).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
     Ok((parent_fd, leaf))
 }
 
@@ -176,7 +177,10 @@ pub(crate) fn create_file(
 /// List a directory beneath the entry root, returning `(name, type)` for each
 /// child (excluding `.`/`..`). Child types come from `fstatat` with
 /// `AT_SYMLINK_NOFOLLOW`, so symlinks are reported as symlinks.
-pub(crate) fn list_dir(entry_root: &Path, relative: &Path) -> io::Result<Vec<(OsString, FileType)>> {
+pub(crate) fn list_dir(
+    entry_root: &Path,
+    relative: &Path,
+) -> io::Result<Vec<(OsString, FileType)>> {
     let root = open_root(entry_root)?;
     let dir_fd = openat2_beneath(&root, relative, libc::O_RDONLY | libc::O_DIRECTORY, 0)?;
     let dir_raw = dir_fd.as_raw_fd();
@@ -209,9 +213,8 @@ pub(crate) fn list_dir(entry_root: &Path, relative: &Path) -> io::Result<Vec<(Os
             Err(_) => continue,
         };
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
-        let rc = unsafe {
-            libc::fstatat(dir_raw, cname.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW)
-        };
+        let rc =
+            unsafe { libc::fstatat(dir_raw, cname.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) };
         if rc != 0 {
             continue;
         }
@@ -265,11 +268,7 @@ pub(crate) fn readlink(entry_root: &Path, relative: &Path) -> io::Result<PathBuf
 
 /// Rename within a single entry. Both endpoints resolve beneath the same entry
 /// root (cross-entry rename is rejected before this is called).
-pub(crate) fn rename(
-    entry_root: &Path,
-    source: &Path,
-    destination: &Path,
-) -> io::Result<()> {
+pub(crate) fn rename(entry_root: &Path, source: &Path, destination: &Path) -> io::Result<()> {
     let (src_parent, src_leaf) = open_parent(entry_root, source)?;
     let (dst_parent, dst_leaf) = open_parent(entry_root, destination)?;
     check(unsafe {
@@ -284,11 +283,7 @@ pub(crate) fn rename(
 
 /// Hard link within a single entry. `linkat` with flags `0` does not follow a
 /// symlink source.
-pub(crate) fn hard_link(
-    entry_root: &Path,
-    source: &Path,
-    destination: &Path,
-) -> io::Result<()> {
+pub(crate) fn hard_link(entry_root: &Path, source: &Path, destination: &Path) -> io::Result<()> {
     let (src_parent, src_leaf) = open_parent(entry_root, source)?;
     let (dst_parent, dst_leaf) = open_parent(entry_root, destination)?;
     check(unsafe {
@@ -404,7 +399,11 @@ mod tests {
 
         // Following the escaping link out of the entry must fail with EXDEV.
         let err = lstat(&root, Path::new("esc/secret")).unwrap_err();
-        assert_eq!(err.raw_os_error(), Some(libc::EXDEV), "expected EXDEV, got {err:?}");
+        assert_eq!(
+            err.raw_os_error(),
+            Some(libc::EXDEV),
+            "expected EXDEV, got {err:?}"
+        );
 
         let open_err = open_file(&root, Path::new("esc/secret"), libc::O_RDONLY, 0).unwrap_err();
         assert_eq!(open_err.raw_os_error(), Some(libc::EXDEV));
@@ -425,7 +424,9 @@ mod tests {
 
         // `..` that climbs out of the root is refused even though the path is
         // lexically valid on the host.
-        let rel = PathBuf::from("../").join(outside.file_name().unwrap()).join("secret");
+        let rel = PathBuf::from("../")
+            .join(outside.file_name().unwrap())
+            .join("secret");
         let err = lstat(&root, &rel).unwrap_err();
         assert_eq!(err.raw_os_error(), Some(libc::EXDEV));
 
@@ -447,10 +448,22 @@ mod tests {
             .collect();
         names.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(names.len(), 3);
-        assert!(names.iter().any(|(n, t)| n == "f" && *t == FileType::RegularFile));
-        assert!(names.iter().any(|(n, t)| n == "inner" && *t == FileType::Directory));
+        assert!(
+            names
+                .iter()
+                .any(|(n, t)| n == "f" && *t == FileType::RegularFile)
+        );
+        assert!(
+            names
+                .iter()
+                .any(|(n, t)| n == "inner" && *t == FileType::Directory)
+        );
         // The symlink is reported as a symlink, not followed to /etc.
-        assert!(names.iter().any(|(n, t)| n == "lnk" && *t == FileType::Symlink));
+        assert!(
+            names
+                .iter()
+                .any(|(n, t)| n == "lnk" && *t == FileType::Symlink)
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -463,7 +476,13 @@ mod tests {
         mkdir(&root, Path::new("d/made"), 0o755).unwrap();
         assert!(root.join("d/made").is_dir());
 
-        let _ = create_file(&root, Path::new("d/new"), libc::O_CREAT | libc::O_EXCL | libc::O_RDWR, 0o644).unwrap();
+        let _ = create_file(
+            &root,
+            Path::new("d/new"),
+            libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
+            0o644,
+        )
+        .unwrap();
         assert!(root.join("d/new").is_file());
 
         unlink(&root, Path::new("d/new")).unwrap();
