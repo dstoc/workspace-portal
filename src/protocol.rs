@@ -13,8 +13,14 @@ pub enum ControlRequest {
         mode: AccessMode,
         replace: bool,
     },
+    Freeze {
+        segment: String,
+    },
     Remove {
         name: String,
+    },
+    Thaw {
+        segment: String,
     },
     Status,
     Stop,
@@ -81,6 +87,8 @@ pub struct StatusPayload {
     pub daemon: DaemonStatus,
     pub socket: PathBuf,
     pub entries: Vec<EntryState>,
+    #[serde(default)]
+    pub immutable_segments: Vec<String>,
 }
 
 impl From<WorkspaceSnapshot> for StatusPayload {
@@ -91,6 +99,7 @@ impl From<WorkspaceSnapshot> for StatusPayload {
             daemon: value.daemon,
             socket: value.socket,
             entries: value.entries.into_iter().map(Into::into).collect(),
+            immutable_segments: value.immutable_segments,
         }
     }
 }
@@ -146,6 +155,7 @@ mod tests {
                     PathBuf::from("/tmp/docs"),
                     AccessMode::ReadOnly,
                 )],
+                immutable_segments: vec!["vendor".to_owned()],
                 generation: 7,
             },
         };
@@ -167,6 +177,7 @@ mod tests {
                 PathBuf::from("/tmp/docs"),
                 AccessMode::ReadWrite,
             )],
+            immutable_segments: vec!["cache".to_owned(), "vendor".to_owned()],
             generation: 3,
         };
 
@@ -174,5 +185,20 @@ mod tests {
         assert_eq!(payload.entries.len(), 1);
         assert_eq!(payload.entries[0].name, "docs");
         assert_eq!(payload.daemon, DaemonStatus::Stopped);
+        assert_eq!(
+            payload.immutable_segments,
+            vec!["cache".to_owned(), "vendor".to_owned()]
+        );
+    }
+
+    #[test]
+    fn freeze_request_roundtrips_through_json() {
+        let request = ControlRequest::Freeze {
+            segment: "vendor".to_owned(),
+        };
+
+        let encoded = encode_request(&request).unwrap();
+        assert_eq!(encoded, r#"{"op":"freeze","segment":"vendor"}"#);
+        assert_eq!(decode_request(&encoded).unwrap(), request);
     }
 }

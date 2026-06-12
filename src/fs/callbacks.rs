@@ -25,10 +25,21 @@ use super::{
     PortalFs, ROOT_INO, TTL,
     attr::{attr_from_metadata, current_attr, directory_attr, file_attr, root_attr},
     path::{PortalPath, child_portal_path, portal_path_to_pathbuf},
-    resolve::{entry_is_read_only, errno_from_error, state_for_path, validate_rename},
+    resolve::{
+        ensure_mutable_relative_path, entry_is_read_only, errno_from_error,
+        is_immutable_path_error, state_for_path, validate_rename,
+    },
     runtime::OpenHandleKind,
     safe_open,
 };
+
+fn mutation_permission_errno(error: &Error, fallback: Errno) -> Errno {
+    if is_immutable_path_error(error) {
+        Errno::EPERM
+    } else {
+        fallback
+    }
+}
 
 fn dir_entries(
     runtime: &mut super::runtime::FuseRuntime,
@@ -110,6 +121,7 @@ fn open_path(
     let writable = (flags & libc::O_ACCMODE) != libc::O_RDONLY;
     if writable {
         super::resolve::ensure_writable_entry(&resolved.entry)?;
+        ensure_mutable_relative_path(state, &resolved.relative)?;
         if state.read_only_default {
             return Err(Error::PermissionDenied(
                 "workspace mount is read-only".to_owned(),
@@ -418,6 +430,12 @@ impl Filesystem for PortalFs {
             reply.error(Errno::EROFS);
             return;
         }
+        if mode.is_some() || uid.is_some() || gid.is_some() {
+            if let Err(err) = ensure_mutable_relative_path(&state, &resolved.relative) {
+                reply.error(mutation_permission_errno(&err, Errno::EROFS));
+                return;
+            }
+        }
         if uid.is_some() || gid.is_some() {
             reply.error(Errno::EPERM);
             return;
@@ -448,6 +466,10 @@ impl Filesystem for PortalFs {
                     }
                 }
             } else {
+                if let Err(err) = ensure_mutable_relative_path(&state, &resolved.relative) {
+                    reply.error(mutation_permission_errno(&err, Errno::EROFS));
+                    return;
+                }
                 safe_open::truncate(&resolved.entry.target, &resolved.relative, size)
             };
             if let Err(err) = result {
@@ -473,6 +495,13 @@ impl Filesystem for PortalFs {
 
             // Prefer futimens on an open writable handle; otherwise apply the
             // timestamps through a confined resolution beneath the entry root.
+            if use_fd.is_none()
+                && let Err(err) = ensure_mutable_relative_path(&state, &resolved.relative)
+            {
+                reply.error(mutation_permission_errno(&err, Errno::EROFS));
+                return;
+            }
+
             let result: std::io::Result<()> = if let Some(fd) = use_fd {
                 let rc = unsafe { libc::futimens(fd, times.as_ptr()) };
                 if rc == -1 {
@@ -605,11 +634,13 @@ impl Filesystem for PortalFs {
                 reply.error(Errno::EISDIR)
             }
             Err(Error::PermissionDenied(err)) => {
+                let errno =
+                    mutation_permission_errno(&Error::PermissionDenied(err.clone()), Errno::EROFS);
                 debug!(
-                    "open ino={} path={:?} flags={:#x} -> EROFS err={}",
-                    ino.0, path, flags.0, err
+                    "open ino={} path={:?} flags={:#x} -> {:?} err={}",
+                    ino.0, path, flags.0, errno, err
                 );
-                reply.error(Errno::EROFS)
+                reply.error(errno)
             }
             Err(err) => {
                 debug!(
@@ -643,10 +674,12 @@ impl Filesystem for PortalFs {
 
         let mut runtime = self.runtime.lock().unwrap();
         let name = name.to_os_string();
-        let Ok((path, resolved)) = runtime.resolve_parent_child_writable(&state, parent, &name)
-        else {
-            reply.error(Errno::EACCES);
-            return;
+        let (path, resolved) = match runtime.resolve_parent_child_writable(&state, parent, &name) {
+            Ok(value) => value,
+            Err(err) => {
+                reply.error(mutation_permission_errno(&err, Errno::EACCES));
+                return;
+            }
         };
 
         let mut oflags = libc::O_CREAT | libc::O_EXCL | libc::O_RDWR;
@@ -705,10 +738,12 @@ impl Filesystem for PortalFs {
 
         let mut runtime = self.runtime.lock().unwrap();
         let name = name.to_os_string();
-        let Ok((path, resolved)) = runtime.resolve_parent_child_writable(&state, parent, &name)
-        else {
-            reply.error(Errno::EACCES);
-            return;
+        let (path, resolved) = match runtime.resolve_parent_child_writable(&state, parent, &name) {
+            Ok(value) => value,
+            Err(err) => {
+                reply.error(mutation_permission_errno(&err, Errno::EACCES));
+                return;
+            }
         };
 
         let dir_mode = ((mode & !umask) & 0o7777) as libc::mode_t;
@@ -757,10 +792,12 @@ impl Filesystem for PortalFs {
 
         let mut runtime = self.runtime.lock().unwrap();
         let name = link_name.to_os_string();
-        let Ok((path, resolved)) = runtime.resolve_parent_child_writable(&state, parent, &name)
-        else {
-            reply.error(Errno::EACCES);
-            return;
+        let (path, resolved) = match runtime.resolve_parent_child_writable(&state, parent, &name) {
+            Ok(value) => value,
+            Err(err) => {
+                reply.error(mutation_permission_errno(&err, Errno::EACCES));
+                return;
+            }
         };
 
         match safe_open::symlink(&resolved.entry.target, &resolved.relative, target) {
@@ -794,9 +831,12 @@ impl Filesystem for PortalFs {
 
         let mut runtime = self.runtime.lock().unwrap();
         let name = name.to_os_string();
-        let Ok((_, resolved)) = runtime.resolve_parent_child_writable(&state, parent, &name) else {
-            reply.error(Errno::EACCES);
-            return;
+        let (_, resolved) = match runtime.resolve_parent_child_writable(&state, parent, &name) {
+            Ok(value) => value,
+            Err(err) => {
+                reply.error(mutation_permission_errno(&err, Errno::EACCES));
+                return;
+            }
         };
 
         match safe_open::lstat(&resolved.entry.target, &resolved.relative) {
@@ -818,9 +858,12 @@ impl Filesystem for PortalFs {
 
         let mut runtime = self.runtime.lock().unwrap();
         let name = name.to_os_string();
-        let Ok((_, resolved)) = runtime.resolve_parent_child_writable(&state, parent, &name) else {
-            reply.error(Errno::EACCES);
-            return;
+        let (_, resolved) = match runtime.resolve_parent_child_writable(&state, parent, &name) {
+            Ok(value) => value,
+            Err(err) => {
+                reply.error(mutation_permission_errno(&err, Errno::EACCES));
+                return;
+            }
         };
 
         match safe_open::rmdir(&resolved.entry.target, &resolved.relative) {
@@ -844,25 +887,37 @@ impl Filesystem for PortalFs {
         let source_name = name.to_os_string();
         let target_name = newname.to_os_string();
 
-        let Ok((source_path, source_resolved)) =
-            runtime.resolve_parent_child_writable(&state, parent, &source_name)
-        else {
-            debug!(
-                "rename parent={} name={:?} newparent={} newname={:?} -> EACCES (source)",
-                parent.0, source_name, newparent.0, target_name
-            );
-            reply.error(Errno::EACCES);
-            return;
+        let (source_path, source_resolved) = match runtime.resolve_parent_child_writable(
+            &state,
+            parent,
+            &source_name,
+        ) {
+            Ok(value) => value,
+            Err(err) => {
+                let errno = mutation_permission_errno(&err, Errno::EACCES);
+                debug!(
+                    "rename parent={} name={:?} newparent={} newname={:?} -> {:?} (source) err={}",
+                    parent.0, source_name, newparent.0, target_name, errno, err
+                );
+                reply.error(errno);
+                return;
+            }
         };
-        let Ok((target_path, target_resolved)) =
-            runtime.resolve_parent_child_writable(&state, newparent, &target_name)
-        else {
-            debug!(
-                "rename parent={} name={:?} newparent={} newname={:?} -> EACCES (target)",
-                parent.0, source_name, newparent.0, target_name
-            );
-            reply.error(Errno::EACCES);
-            return;
+        let (target_path, target_resolved) = match runtime.resolve_parent_child_writable(
+            &state,
+            newparent,
+            &target_name,
+        ) {
+            Ok(value) => value,
+            Err(err) => {
+                let errno = mutation_permission_errno(&err, Errno::EACCES);
+                debug!(
+                    "rename parent={} name={:?} newparent={} newname={:?} -> {:?} (target) err={}",
+                    parent.0, source_name, newparent.0, target_name, errno, err
+                );
+                reply.error(errno);
+                return;
+            }
         };
 
         match validate_rename(
@@ -970,14 +1025,20 @@ impl Filesystem for PortalFs {
                 return;
             }
         };
+        if let Err(err) = ensure_mutable_relative_path(&state, &source_resolved.relative) {
+            reply.error(mutation_permission_errno(&err, Errno::EACCES));
+            return;
+        }
 
         let target_name = newname.to_os_string();
-        let Ok((target_path, target_resolved)) =
-            runtime.resolve_parent_child_writable(&state, newparent, &target_name)
-        else {
-            reply.error(Errno::EACCES);
-            return;
-        };
+        let (target_path, target_resolved) =
+            match runtime.resolve_parent_child_writable(&state, newparent, &target_name) {
+                Ok(value) => value,
+                Err(err) => {
+                    reply.error(mutation_permission_errno(&err, Errno::EACCES));
+                    return;
+                }
+            };
 
         if source_resolved.entry.name != target_resolved.entry.name {
             reply.error(Errno::EXDEV);
@@ -1242,6 +1303,10 @@ impl Filesystem for PortalFs {
                 return;
             }
         };
+        if let Err(err) = ensure_mutable_relative_path(&state, &output_resolved.relative) {
+            reply.error(mutation_permission_errno(&err, Errno::EROFS));
+            return;
+        }
         if entry_is_read_only(&output_resolved.entry, state.read_only_default) {
             reply.error(Errno::EROFS);
             return;

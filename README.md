@@ -13,6 +13,7 @@ The intended workflow is:
 workspace-portal start ./workspace --bg
 workspace-portal add ~/code/project-a project-a
 workspace-portal add ~/notes/current notes --ro
+workspace-portal freeze vendor
 workspace-portal status
 ```
 
@@ -62,6 +63,12 @@ Add a read-only entry:
 workspace-portal add --workspace ./workspace --ro ~/notes/current notes
 ```
 
+Freeze a segment name anywhere inside entries:
+
+```bash
+workspace-portal freeze --workspace ./workspace vendor
+```
+
 When you run commands from inside the workspace, `--workspace <path>` is
 optional because the CLI can discover the workspace automatically.
 
@@ -78,6 +85,7 @@ Workspace: /home/user/workspace/workspace-portal/workspace
 Mount:     mounted
 Daemon:    running
 Socket:    /run/user/1000/workspace-portal/7f3a.sock
+IMMUTABLE SEGMENTS: vendor
 
 ENTRY     TARGET                    MODE
 -----     ------                    ----
@@ -151,6 +159,30 @@ workspace-portal rm <mount-point> [--workspace <path>]
 Removing an entry drops it from the namespace immediately; file handles that are
 already open continue to work until they are closed.
 
+### `freeze`
+
+Freeze a segment name workspace-wide:
+
+```bash
+workspace-portal freeze <segment> [--workspace <path>]
+```
+
+If `vendor` is frozen, any subtree rooted at a path component exactly named
+`vendor` becomes immutable through the mount. For example, `project-a/vendor`
+and `project-a/src/vendor` are frozen, while `vendors` and `vendor2` are not.
+
+Reads still work. Mutations through the mount fail with `EPERM`, including
+create, write, rename, unlink, `mkdir`, and metadata changes. Creating a new
+matching segment is also denied.
+
+### `thaw`
+
+Remove a workspace-wide immutable segment rule:
+
+```bash
+workspace-portal thaw <segment> [--workspace <path>]
+```
+
 ### `edit`
 
 Edit the whole entry set at once in your editor:
@@ -165,6 +197,11 @@ rename, retarget, or flip entries between `ro` and `rw`. Flipping or removing an
 entry leaves file handles that are already open undisturbed; only later opens
 see the change. An unchanged or invalid buffer applies nothing.
 
+Immutable segment rules are separate from `edit`. Use `freeze` and `thaw` to
+manage them. Like `rw` to `ro` flips, freezing does not retroactively revoke
+already-open writable file handles; only later path-based mutations and writable
+opens see the new rule.
+
 ### `status`
 
 Show workspace status:
@@ -172,6 +209,9 @@ Show workspace status:
 ```bash
 workspace-portal status [--workspace <path>] [--json]
 ```
+
+Human output includes an `IMMUTABLE SEGMENTS` line. JSON output includes a
+top-level `immutable_segments` array.
 
 ### `stop`
 

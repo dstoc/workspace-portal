@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Component, Path};
 
 use fuser::Errno;
 
@@ -52,6 +52,7 @@ pub fn resolve_write_path(
 ) -> Result<ResolvedPortalPath> {
     let resolved = resolve_portal_path(state, path)?;
     ensure_writable_entry(&resolved.entry)?;
+    ensure_mutable_relative_path(state, &resolved.relative)?;
     Ok(resolved)
 }
 
@@ -94,6 +95,8 @@ pub fn validate_rename(
         .cloned()
         .ok_or_else(|| Error::EntryNotFound(source_name.clone()))?;
     ensure_writable_entry(&entry)?;
+    ensure_mutable_relative_path(state, &source_relative)?;
+    ensure_mutable_relative_path(state, &target_relative)?;
 
     let source_target = if source_relative.as_os_str().is_empty() {
         entry.target.clone()
@@ -135,6 +138,30 @@ pub(crate) fn ensure_writable_entry(entry: &EntryRecord) -> Result<()> {
     }
 }
 
+pub(crate) fn immutable_segment_match(state: &PortalState, relative: &Path) -> Option<String> {
+    relative.components().find_map(|component| match component {
+        Component::Normal(segment) => {
+            let segment = segment.to_str()?;
+            state
+                .immutable_segments
+                .contains(segment)
+                .then(|| segment.to_owned())
+        }
+        _ => None,
+    })
+}
+
+pub(crate) fn ensure_mutable_relative_path(state: &PortalState, relative: &Path) -> Result<()> {
+    if let Some(segment) = immutable_segment_match(state, relative) {
+        return Err(Error::ImmutablePath { segment });
+    }
+    Ok(())
+}
+
+pub(crate) fn is_immutable_path_error(error: &Error) -> bool {
+    matches!(error, Error::ImmutablePath { .. })
+}
+
 pub(crate) fn entry_is_read_only(entry: &EntryRecord, read_only_default: bool) -> bool {
     entry.mode == AccessMode::ReadOnly || read_only_default
 }
@@ -144,7 +171,7 @@ pub(crate) fn errno_from_error(error: &Error) -> Errno {
         Error::Io(err) => Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO)),
         Error::EntryNotFound(_) | Error::TargetNotFound(_) => Errno::ENOENT,
         Error::TargetNotDirectory(_) => Errno::ENOTDIR,
-        Error::PermissionDenied(_) => Errno::EPERM,
+        Error::PermissionDenied(_) | Error::ImmutablePath { .. } => Errno::EPERM,
         Error::InvalidPortalPath(_) => Errno::EINVAL,
         _ => Errno::EIO,
     }
@@ -188,6 +215,7 @@ mod tests {
                 false,
             )
             .unwrap();
+        state.freeze_segment("vendor".to_owned());
         state
     }
 
@@ -224,5 +252,30 @@ mod tests {
             plan.target_target,
             state.entry("docs").unwrap().target.join("b.txt")
         );
+    }
+
+    #[test]
+    fn rejects_mutations_under_immutable_segments() {
+        let state = test_state();
+
+        let err = resolve_write_path(&state, "/docs/vendor/lock.json").unwrap_err();
+        assert!(is_immutable_path_error(&err));
+
+        let err = resolve_write_path(&state, "/docs/src/vendor").unwrap_err();
+        assert!(is_immutable_path_error(&err));
+
+        let err =
+            validate_rename(&state, "/docs/tmp/file.txt", "/docs/vendor/file.txt").unwrap_err();
+        assert!(is_immutable_path_error(&err));
+    }
+
+    #[test]
+    fn immutable_segment_matching_is_exact() {
+        let state = test_state();
+
+        assert!(ensure_mutable_relative_path(&state, Path::new("src/vendors/file.txt")).is_ok());
+        let err =
+            ensure_mutable_relative_path(&state, Path::new("src/vendor/file.txt")).unwrap_err();
+        assert!(is_immutable_path_error(&err));
     }
 }

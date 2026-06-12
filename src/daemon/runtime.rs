@@ -158,6 +158,17 @@ impl Daemon {
                     message: format!("added {name}"),
                 })
             }
+            ControlRequest::Freeze { segment } => {
+                paths::validate_immutable_segment_name(&segment)?;
+                {
+                    let mut state = self.state.write().unwrap();
+                    state.freeze_segment(segment.clone());
+                }
+                self.persist_state()?;
+                Ok(ControlResponse::Ack {
+                    message: format!("froze {segment}"),
+                })
+            }
             ControlRequest::Remove { name } => {
                 paths::validate_entry_name(&name)?;
                 let removed = {
@@ -167,6 +178,17 @@ impl Daemon {
                 self.persist_state()?;
                 Ok(ControlResponse::Ack {
                     message: format!("removed {}", removed.name),
+                })
+            }
+            ControlRequest::Thaw { segment } => {
+                paths::validate_immutable_segment_name(&segment)?;
+                {
+                    let mut state = self.state.write().unwrap();
+                    state.thaw_segment(&segment);
+                }
+                self.persist_state()?;
+                Ok(ControlResponse::Ack {
+                    message: format!("thawed {segment}"),
                 })
             }
             ControlRequest::Stop => {
@@ -241,7 +263,9 @@ fn protocol_error_code(error: &Error) -> ProtocolErrorCode {
         Error::EntryNotFound(_) => ProtocolErrorCode::EntryNotFound,
         Error::InvalidEntryName(_) => ProtocolErrorCode::InvalidName,
         Error::InvalidPortalPath(_) => ProtocolErrorCode::InvalidTarget,
-        Error::PermissionDenied(_) => ProtocolErrorCode::PermissionDenied,
+        Error::PermissionDenied(_) | Error::ImmutablePath { .. } => {
+            ProtocolErrorCode::PermissionDenied
+        }
         Error::TargetNotFound(_) | Error::TargetNotDirectory(_) => ProtocolErrorCode::InvalidTarget,
         Error::DaemonNotRunning(_) => ProtocolErrorCode::DaemonNotRunning,
         Error::DaemonAlreadyRunning(_) => ProtocolErrorCode::DaemonAlreadyRunning,
@@ -249,5 +273,77 @@ fn protocol_error_code(error: &Error) -> ProtocolErrorCode {
         Error::StateCorrupt(_) => ProtocolErrorCode::StaleState,
         Error::Cli(_) | Error::Protocol(_) | Error::Unsupported(_) => ProtocolErrorCode::Internal,
         Error::Io(_) | Error::Json(_) | Error::InvalidWorkspace(_) => ProtocolErrorCode::Internal,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        env,
+        path::PathBuf,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    use super::*;
+    use crate::state::PortalState;
+
+    static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+
+    fn unique_path(prefix: &str) -> PathBuf {
+        let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
+        env::temp_dir().join(format!(
+            "workspace-portal-runtime-{prefix}-{}-{id}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn freeze_and_thaw_requests_persist_state() {
+        let workspace = unique_path("workspace");
+        let state_path = unique_path("state").join("portal.json");
+        let registry_path = unique_path("registry").join("workspace.json");
+        let socket = unique_path("runtime").join("portal.sock");
+        let state = PortalState::new(workspace.clone(), "abc123".to_owned(), socket.clone())
+            .with_storage_paths(state_path.clone());
+        let mut daemon = Daemon::new(DaemonConfig {
+            state,
+            state_path: state_path.clone(),
+            registry_path,
+            allow_other: false,
+        });
+
+        let response = daemon
+            .handle_request(ControlRequest::Freeze {
+                segment: "vendor".to_owned(),
+            })
+            .unwrap();
+        assert_eq!(
+            response,
+            ControlResponse::Ack {
+                message: "froze vendor".to_owned()
+            }
+        );
+
+        let persisted = PortalState::load_from_path(&state_path).unwrap();
+        assert!(persisted.immutable_segments.contains("vendor"));
+
+        let response = daemon
+            .handle_request(ControlRequest::Thaw {
+                segment: "vendor".to_owned(),
+            })
+            .unwrap();
+        assert_eq!(
+            response,
+            ControlResponse::Ack {
+                message: "thawed vendor".to_owned()
+            }
+        );
+
+        let persisted = PortalState::load_from_path(&state_path).unwrap();
+        assert!(!persisted.immutable_segments.contains("vendor"));
+
+        let _ = fs::remove_dir_all(&workspace);
+        let _ = fs::remove_file(&state_path);
+        let _ = fs::remove_dir_all(state_path.parent().unwrap());
     }
 }

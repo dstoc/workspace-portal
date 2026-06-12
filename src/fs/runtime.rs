@@ -231,6 +231,7 @@ impl FuseRuntime {
     ) -> Result<(PortalPath, super::path::ResolvedPortalPath)> {
         let (path, resolved) = self.resolve_parent_child(state, parent, name)?;
         super::resolve::ensure_writable_entry(&resolved.entry)?;
+        super::resolve::ensure_mutable_relative_path(state, &resolved.relative)?;
         if state.read_only_default {
             return Err(Error::PermissionDenied(
                 "workspace mount is read-only".to_owned(),

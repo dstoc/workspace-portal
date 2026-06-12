@@ -57,6 +57,12 @@ pub struct AddArgs {
 }
 
 #[derive(Debug, Clone)]
+pub struct FreezeArgs {
+    pub workspace: Option<PathBuf>,
+    pub segment: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct RemoveArgs {
     pub workspace: Option<PathBuf>,
     pub mount_point: String,
@@ -73,6 +79,12 @@ pub struct StopArgs {
     pub workspace: Option<PathBuf>,
     pub lazy: bool,
     pub force: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ThawArgs {
+    pub workspace: Option<PathBuf>,
+    pub segment: String,
 }
 
 #[derive(Debug, Clone)]
@@ -218,6 +230,27 @@ pub async fn remove(args: RemoveArgs) -> Result<()> {
     }
 }
 
+pub async fn freeze(args: FreezeArgs) -> Result<()> {
+    let (ctx, state) = load_workspace_context(args.workspace.clone())?;
+    let segment = args.segment.clone();
+    let request = ControlRequest::Freeze {
+        segment: segment.clone(),
+    };
+    match send_request(&ctx.socket, &request) {
+        Ok(response) => ensure_response_ok(response),
+        Err(err) => {
+            let (_, persisted) = load_workspace_context(args.workspace)?;
+            if persisted.immutable_segments.contains(&segment)
+                || state.immutable_segments.contains(&segment)
+            {
+                Ok(())
+            } else {
+                Err(err)
+            }
+        }
+    }
+}
+
 pub async fn status(args: StatusArgs) -> Result<()> {
     let (ctx, live_state) = load_workspace_context(args.workspace)?;
     let socket_live = socket_is_live(&ctx.socket)?;
@@ -295,6 +328,27 @@ pub async fn stop(args: StopArgs) -> Result<()> {
     }
 
     Err(Error::DaemonNotRunning(ctx.workspace))
+}
+
+pub async fn thaw(args: ThawArgs) -> Result<()> {
+    let (ctx, state) = load_workspace_context(args.workspace.clone())?;
+    let segment = args.segment.clone();
+    let request = ControlRequest::Thaw {
+        segment: segment.clone(),
+    };
+    match send_request(&ctx.socket, &request) {
+        Ok(response) => ensure_response_ok(response),
+        Err(err) => {
+            let (_, persisted) = load_workspace_context(args.workspace)?;
+            if !persisted.immutable_segments.contains(&segment)
+                && !state.immutable_segments.contains(&segment)
+            {
+                Ok(())
+            } else {
+                Err(err)
+            }
+        }
+    }
 }
 
 pub async fn list(_args: ListArgs) -> Result<()> {

@@ -23,6 +23,12 @@ pub(crate) fn print_status(snapshot: WorkspaceSnapshot) {
         }
     );
     println!("Socket:    {}", snapshot.socket.display());
+    let immutable_segments = if snapshot.immutable_segments.is_empty() {
+        "<none>".to_owned()
+    } else {
+        snapshot.immutable_segments.join(", ")
+    };
+    println!("IMMUTABLE SEGMENTS: {immutable_segments}");
     println!();
     let entries: Vec<_> = snapshot.entries.into_iter().map(Into::into).collect();
     print!("{}", entry_format::render_entries(&entries, false));

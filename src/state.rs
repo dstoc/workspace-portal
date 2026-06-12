@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -84,6 +84,8 @@ pub struct WorkspaceSnapshot {
     pub daemon: DaemonStatus,
     pub socket: PathBuf,
     pub entries: Vec<EntryRecord>,
+    #[serde(default)]
+    pub immutable_segments: Vec<String>,
     pub generation: u64,
 }
 
@@ -106,6 +108,8 @@ pub struct PortalState {
     pub generation: u64,
     #[serde(default)]
     pub entries: BTreeMap<String, EntryRecord>,
+    #[serde(default)]
+    pub immutable_segments: BTreeSet<String>,
 }
 
 impl PortalState {
@@ -121,6 +125,7 @@ impl PortalState {
             read_only_default: false,
             generation: 0,
             entries: BTreeMap::new(),
+            immutable_segments: BTreeSet::new(),
         }
     }
 
@@ -165,6 +170,22 @@ impl PortalState {
         self.entries.get(name)
     }
 
+    pub fn freeze_segment(&mut self, segment: String) -> bool {
+        let inserted = self.immutable_segments.insert(segment);
+        if inserted {
+            self.generation = self.generation.saturating_add(1);
+        }
+        inserted
+    }
+
+    pub fn thaw_segment(&mut self, segment: &str) -> bool {
+        let removed = self.immutable_segments.remove(segment);
+        if removed {
+            self.generation = self.generation.saturating_add(1);
+        }
+        removed
+    }
+
     pub fn snapshot(&self) -> WorkspaceSnapshot {
         WorkspaceSnapshot {
             workspace: self.workspace.clone(),
@@ -172,6 +193,7 @@ impl PortalState {
             daemon: self.daemon,
             socket: self.socket.clone(),
             entries: self.entries.values().cloned().collect(),
+            immutable_segments: self.immutable_segments.iter().cloned().collect(),
             generation: self.generation,
         }
     }
@@ -322,6 +344,7 @@ mod tests {
         .with_storage_paths(state_file.clone());
         state.mounted = true;
         state.daemon = DaemonStatus::Running;
+        state.freeze_segment("vendor".to_owned());
         state
             .add_entry(
                 EntryRecord::new("docs", workspace.join("docs"), AccessMode::ReadOnly),
@@ -336,11 +359,37 @@ mod tests {
         let loaded = PortalState::load_from_path(&state_file).unwrap();
         assert_eq!(loaded.workspace, state.workspace);
         assert_eq!(loaded.entries.len(), 1);
+        assert!(loaded.immutable_segments.contains("vendor"));
         assert_eq!(loaded.entry("docs").unwrap().mode, AccessMode::ReadOnly);
         assert_eq!(loaded.state_file, state_file);
 
         let _ = fs::remove_file(&state_file);
         let _ = fs::remove_dir_all(&state_dir);
         let _ = fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn freeze_and_thaw_segments_are_sorted_and_update_generation_on_change() {
+        let workspace = unique_path("state-workspace-freeze");
+        let mut state = PortalState::new(
+            workspace.clone(),
+            "abc123".to_owned(),
+            workspace.join("socket.sock"),
+        );
+
+        assert!(state.freeze_segment("vendor".to_owned()));
+        assert!(state.freeze_segment("cache".to_owned()));
+        assert!(!state.freeze_segment("vendor".to_owned()));
+        assert_eq!(state.generation, 2);
+
+        let snapshot = state.snapshot();
+        assert_eq!(
+            snapshot.immutable_segments,
+            vec!["cache".to_owned(), "vendor".to_owned()]
+        );
+
+        assert!(state.thaw_segment("vendor"));
+        assert!(!state.thaw_segment("vendor"));
+        assert_eq!(state.generation, 3);
     }
 }

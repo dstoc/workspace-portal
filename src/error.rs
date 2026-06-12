@@ -27,6 +27,9 @@ pub enum Error {
     #[error("permission denied: {0}")]
     PermissionDenied(String),
 
+    #[error("path contains immutable segment: '{segment}'")]
+    ImmutablePath { segment: String },
+
     #[error("target not found: {0}")]
     TargetNotFound(PathBuf),
 

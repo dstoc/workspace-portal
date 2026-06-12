@@ -9,7 +9,7 @@ use nix::unistd::Uid;
 use crate::error::{Error, Result};
 use crate::state::PortalState;
 
-pub fn validate_entry_name(name: &str) -> Result<()> {
+fn validate_portal_child_name(name: &str) -> Result<()> {
     if name.is_empty() {
         return Err(Error::InvalidEntryName(name.to_owned()));
     }
@@ -30,6 +30,14 @@ pub fn validate_entry_name(name: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+pub fn validate_entry_name(name: &str) -> Result<()> {
+    validate_portal_child_name(name)
+}
+
+pub fn validate_immutable_segment_name(segment: &str) -> Result<()> {
+    validate_portal_child_name(segment)
 }
 
 pub fn state_file_path_in(root: impl AsRef<Path>, workspace_id: &str) -> PathBuf {
@@ -147,6 +155,17 @@ mod tests {
             );
         }
         assert!(validate_entry_name("valid-name_1").is_ok());
+    }
+
+    #[test]
+    fn validate_immutable_segment_name_matches_entry_child_rules() {
+        for segment in ["", ".", "..", "a/b", "a\0b"] {
+            assert!(matches!(
+                validate_immutable_segment_name(segment),
+                Err(Error::InvalidEntryName(value)) if value == segment
+            ));
+        }
+        assert!(validate_immutable_segment_name("vendor").is_ok());
     }
 
     #[test]
