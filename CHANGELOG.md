@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/dstoc/workspace-portal/compare/workspace-portal-v0.1.1...workspace-portal-v0.1.2) (2026-06-13)
+
+
+### Features
+
+* add immutable path segments (freeze/thaw) ([27ed10f](https://github.com/dstoc/workspace-portal/commit/27ed10f64a1edaa61e0960b7cdd27f256ef71935))
+
 ## [0.1.1](https://github.com/dstoc/workspace-portal/compare/workspace-portal-v0.1.0...workspace-portal-v0.1.1) (2026-06-05)
 
 
