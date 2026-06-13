@@ -430,11 +430,11 @@ impl Filesystem for PortalFs {
             reply.error(Errno::EROFS);
             return;
         }
-        if mode.is_some() || uid.is_some() || gid.is_some() {
-            if let Err(err) = ensure_mutable_relative_path(&state, &resolved.relative) {
-                reply.error(mutation_permission_errno(&err, Errno::EROFS));
-                return;
-            }
+        if (mode.is_some() || uid.is_some() || gid.is_some())
+            && let Err(err) = ensure_mutable_relative_path(&state, &resolved.relative)
+        {
+            reply.error(mutation_permission_errno(&err, Errno::EROFS));
+            return;
         }
         if uid.is_some() || gid.is_some() {
             reply.error(Errno::EPERM);
