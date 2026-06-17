@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.3](https://github.com/dstoc/workspace-portal/compare/workspace-portal-v0.1.2...workspace-portal-v0.1.3) (2026-06-17)
+
+
+### Features
+
+* Add diagnostic tracing for portal operations ([c3b139d](https://github.com/dstoc/workspace-portal/commit/c3b139dc344097f992e2a06d776787a733720439))
+
+
+### Bug Fixes
+
+* Allow no-op uid/gid setattr requests ([741f0c3](https://github.com/dstoc/workspace-portal/commit/741f0c3eff8bc4cd5dc0ed14a14a0ddd526d9008))
+
 ## [0.1.2](https://github.com/dstoc/workspace-portal/compare/workspace-portal-v0.1.1...workspace-portal-v0.1.2) (2026-06-13)
 
 
