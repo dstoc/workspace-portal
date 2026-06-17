@@ -491,25 +491,53 @@ impl Filesystem for PortalFs {
                 Ok(metadata) => (Some(metadata.uid()), Some(metadata.gid())),
                 Err(_) => (None, None),
             };
-            debug!(
-                operation = "setattr",
-                ino = ino.0,
-                file_handle = ?fh.map(|fh| fh.0),
-                portal_path = %portal_path_to_pathbuf(&path).display(),
-                entry = %resolved.entry.name,
-                entry_target = %resolved.entry.target.display(),
-                relative_path = %resolved.relative.display(),
-                target = %resolved.target.display(),
-                requested_uid = ?uid,
-                requested_gid = ?gid,
-                current_uid = ?current_uid,
-                current_gid = ?current_gid,
-                current_metadata_error = ?current_metadata.as_ref().err(),
-                errno = ?Errno::EPERM,
-                "setattr denied uid/gid change"
-            );
-            reply.error(Errno::EPERM);
-            return;
+            let uid_matches = match (uid, current_uid) {
+                (Some(requested), Some(current)) => requested == current,
+                (None, _) => true,
+                _ => false,
+            };
+            let gid_matches = match (gid, current_gid) {
+                (Some(requested), Some(current)) => requested == current,
+                (None, _) => true,
+                _ => false,
+            };
+            if uid_matches && gid_matches {
+                debug!(
+                    operation = "setattr",
+                    ino = ino.0,
+                    file_handle = ?fh.map(|fh| fh.0),
+                    portal_path = %portal_path_to_pathbuf(&path).display(),
+                    entry = %resolved.entry.name,
+                    entry_target = %resolved.entry.target.display(),
+                    relative_path = %resolved.relative.display(),
+                    target = %resolved.target.display(),
+                    requested_uid = ?uid,
+                    requested_gid = ?gid,
+                    current_uid = ?current_uid,
+                    current_gid = ?current_gid,
+                    "setattr allowed no-op uid/gid change"
+                );
+            } else {
+                debug!(
+                    operation = "setattr",
+                    ino = ino.0,
+                    file_handle = ?fh.map(|fh| fh.0),
+                    portal_path = %portal_path_to_pathbuf(&path).display(),
+                    entry = %resolved.entry.name,
+                    entry_target = %resolved.entry.target.display(),
+                    relative_path = %resolved.relative.display(),
+                    target = %resolved.target.display(),
+                    requested_uid = ?uid,
+                    requested_gid = ?gid,
+                    current_uid = ?current_uid,
+                    current_gid = ?current_gid,
+                    current_metadata_error = ?current_metadata.as_ref().err(),
+                    errno = ?Errno::EPERM,
+                    "setattr denied uid/gid change"
+                );
+                reply.error(Errno::EPERM);
+                return;
+            }
         }
 
         if let Some(mode) = mode
@@ -659,21 +687,6 @@ impl Filesystem for PortalFs {
                 return;
             }
 
-            debug!(
-                operation = "setattr",
-                ino = ino.0,
-                file_handle = ?fh.map(|fh| fh.0),
-                portal_path = %portal_path_to_pathbuf(&path).display(),
-                entry = %resolved.entry.name,
-                entry_target = %resolved.entry.target.display(),
-                relative_path = %resolved.relative.display(),
-                target = %resolved.target.display(),
-                atime_requested = atime.is_some(),
-                mtime_requested = mtime.is_some(),
-                timestamp_method = if use_fd.is_some() { "futimens" } else { "set_times" },
-                "setattr applying timestamps"
-            );
-
             let result: std::io::Result<()> = if let Some(fd) = use_fd {
                 let rc = unsafe { libc::futimens(fd, times.as_ptr()) };
                 if rc == -1 {
@@ -709,20 +722,7 @@ impl Filesystem for PortalFs {
         }
 
         match current_attr(&mut runtime, &state, &path) {
-            Ok(attr) => {
-                debug!(
-                    operation = "setattr",
-                    ino = ino.0,
-                    file_handle = ?fh.map(|fh| fh.0),
-                    portal_path = %portal_path_to_pathbuf(&path).display(),
-                    entry = %resolved.entry.name,
-                    entry_target = %resolved.entry.target.display(),
-                    relative_path = %resolved.relative.display(),
-                    target = %resolved.target.display(),
-                    "setattr succeeded"
-                );
-                reply.attr(&TTL, &attr)
-            }
+            Ok(attr) => reply.attr(&TTL, &attr),
             Err(err) => {
                 debug!(
                     operation = "setattr",

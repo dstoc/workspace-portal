@@ -729,6 +729,39 @@ fn fuse_e2e_file_lifecycle_covers_create_append_overwrite_truncate_and_fsync()
 
 #[test]
 #[ignore]
+fn fuse_e2e_touch_create_allows_noop_owner_setattr() -> Result<(), Box<dyn Error>> {
+    require_fuse_prerequisites();
+
+    let fixture = Fixture::new();
+    start_rw_workspace(&fixture);
+
+    let mounted = fixture.workspace.join("docs/touched.txt");
+    let host = fixture.docs_target.join("touched.txt");
+
+    let touch = Command::new("touch").arg(&mounted).output()?;
+    assert!(
+        touch.status.success(),
+        "touch through rw entry failed: {}",
+        String::from_utf8_lossy(&touch.stderr)
+    );
+    assert!(
+        mounted.exists(),
+        "touched file should remain visible in mount"
+    );
+    assert!(host.exists(), "touched file should exist in backing target");
+
+    let stop = run(
+        &["stop", "--workspace", &fixture.workspace_arg()],
+        &fixture.envs(),
+    );
+    assert!(stop.status.success(), "{}", output_text(&stop));
+    wait_for_mounted_state(&fixture, false);
+
+    Ok(())
+}
+
+#[test]
+#[ignore]
 fn fuse_e2e_flush_does_not_require_fsync() -> Result<(), Box<dyn Error>> {
     require_fuse_prerequisites();
 
