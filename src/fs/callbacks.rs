@@ -2,7 +2,7 @@ use std::{
     cmp,
     ffi::CString,
     fs,
-    os::unix::{ffi::OsStrExt, fs::FileExt, io::AsRawFd},
+    os::unix::{ffi::OsStrExt, fs::FileExt, fs::MetadataExt, io::AsRawFd},
     path::Path,
     time::SystemTime,
 };
@@ -39,6 +39,10 @@ fn mutation_permission_errno(error: &Error, fallback: Errno) -> Errno {
     } else {
         fallback
     }
+}
+
+fn raw_os_errno(error: &std::io::Error) -> i32 {
+    error.raw_os_error().unwrap_or(libc::EIO)
 }
 
 fn dir_entries(
@@ -415,28 +419,95 @@ impl Filesystem for PortalFs {
         let state = self.state.read().unwrap().clone();
         let mut runtime = self.runtime.lock().unwrap();
         let Some(path) = runtime.path_for_inode(&state, ino) else {
+            debug!(
+                operation = "setattr",
+                ino = ino.0,
+                file_handle = ?fh.map(|fh| fh.0),
+                errno = ?Errno::ENOENT,
+                "setattr failed for unknown inode"
+            );
             reply.error(Errno::ENOENT);
             return;
         };
         let resolved = match state_for_path(&state, &path) {
             Ok(resolved) => resolved,
-            Err(_) => {
+            Err(err) => {
+                debug!(
+                    operation = "setattr",
+                    ino = ino.0,
+                    file_handle = ?fh.map(|fh| fh.0),
+                    portal_path = %portal_path_to_pathbuf(&path).display(),
+                    errno = ?Errno::ENOENT,
+                    error = %err,
+                    "setattr failed to resolve portal path"
+                );
                 reply.error(Errno::ENOENT);
                 return;
             }
         };
 
         if entry_is_read_only(&resolved.entry, state.read_only_default) {
+            debug!(
+                operation = "setattr",
+                ino = ino.0,
+                file_handle = ?fh.map(|fh| fh.0),
+                portal_path = %portal_path_to_pathbuf(&path).display(),
+                entry = %resolved.entry.name,
+                entry_target = %resolved.entry.target.display(),
+                relative_path = %resolved.relative.display(),
+                target = %resolved.target.display(),
+                errno = ?Errno::EROFS,
+                "setattr denied on read-only entry"
+            );
             reply.error(Errno::EROFS);
             return;
         }
         if (mode.is_some() || uid.is_some() || gid.is_some())
             && let Err(err) = ensure_mutable_relative_path(&state, &resolved.relative)
         {
-            reply.error(mutation_permission_errno(&err, Errno::EROFS));
+            let errno = mutation_permission_errno(&err, Errno::EROFS);
+            debug!(
+                operation = "setattr",
+                ino = ino.0,
+                file_handle = ?fh.map(|fh| fh.0),
+                portal_path = %portal_path_to_pathbuf(&path).display(),
+                entry = %resolved.entry.name,
+                entry_target = %resolved.entry.target.display(),
+                relative_path = %resolved.relative.display(),
+                target = %resolved.target.display(),
+                errno = ?errno,
+                error = %err,
+                mode_requested = mode.is_some(),
+                requested_uid = ?uid,
+                requested_gid = ?gid,
+                "setattr metadata change denied by immutable path"
+            );
+            reply.error(errno);
             return;
         }
         if uid.is_some() || gid.is_some() {
+            let current_metadata = safe_open::lstat(&resolved.entry.target, &resolved.relative);
+            let (current_uid, current_gid) = match current_metadata.as_ref() {
+                Ok(metadata) => (Some(metadata.uid()), Some(metadata.gid())),
+                Err(_) => (None, None),
+            };
+            debug!(
+                operation = "setattr",
+                ino = ino.0,
+                file_handle = ?fh.map(|fh| fh.0),
+                portal_path = %portal_path_to_pathbuf(&path).display(),
+                entry = %resolved.entry.name,
+                entry_target = %resolved.entry.target.display(),
+                relative_path = %resolved.relative.display(),
+                target = %resolved.target.display(),
+                requested_uid = ?uid,
+                requested_gid = ?gid,
+                current_uid = ?current_uid,
+                current_gid = ?current_gid,
+                current_metadata_error = ?current_metadata.as_ref().err(),
+                errno = ?Errno::EPERM,
+                "setattr denied uid/gid change"
+            );
             reply.error(Errno::EPERM);
             return;
         }
@@ -448,7 +519,22 @@ impl Filesystem for PortalFs {
                 (mode & 0o7777) as libc::mode_t,
             )
         {
-            reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO)));
+            let raw_errno = raw_os_errno(&err);
+            debug!(
+                operation = "setattr",
+                ino = ino.0,
+                file_handle = ?fh.map(|fh| fh.0),
+                portal_path = %portal_path_to_pathbuf(&path).display(),
+                entry = %resolved.entry.name,
+                entry_target = %resolved.entry.target.display(),
+                relative_path = %resolved.relative.display(),
+                target = %resolved.target.display(),
+                mode = mode,
+                raw_os_errno = raw_errno,
+                error = %err,
+                "setattr chmod failed"
+            );
+            reply.error(Errno::from_i32(raw_errno));
             return;
         }
 
@@ -457,23 +543,78 @@ impl Filesystem for PortalFs {
                 match runtime.handles.get(&fh.0) {
                     Some(handle) if handle.writable => handle.file.set_len(size),
                     Some(_) => {
+                        debug!(
+                            operation = "setattr",
+                            ino = ino.0,
+                            file_handle = fh.0,
+                            portal_path = %portal_path_to_pathbuf(&path).display(),
+                            entry = %resolved.entry.name,
+                            entry_target = %resolved.entry.target.display(),
+                            relative_path = %resolved.relative.display(),
+                            target = %resolved.target.display(),
+                            size = size,
+                            errno = ?Errno::EPERM,
+                            "setattr truncate denied on read-only handle"
+                        );
                         reply.error(Errno::EPERM);
                         return;
                     }
                     None => {
+                        debug!(
+                            operation = "setattr",
+                            ino = ino.0,
+                            file_handle = fh.0,
+                            portal_path = %portal_path_to_pathbuf(&path).display(),
+                            entry = %resolved.entry.name,
+                            entry_target = %resolved.entry.target.display(),
+                            relative_path = %resolved.relative.display(),
+                            target = %resolved.target.display(),
+                            size = size,
+                            errno = ?Errno::EBADF,
+                            "setattr truncate failed for unknown handle"
+                        );
                         reply.error(Errno::EBADF);
                         return;
                     }
                 }
             } else {
                 if let Err(err) = ensure_mutable_relative_path(&state, &resolved.relative) {
-                    reply.error(mutation_permission_errno(&err, Errno::EROFS));
+                    let errno = mutation_permission_errno(&err, Errno::EROFS);
+                    debug!(
+                        operation = "setattr",
+                        ino = ino.0,
+                        portal_path = %portal_path_to_pathbuf(&path).display(),
+                        entry = %resolved.entry.name,
+                        entry_target = %resolved.entry.target.display(),
+                        relative_path = %resolved.relative.display(),
+                        target = %resolved.target.display(),
+                        size = size,
+                        errno = ?errno,
+                        error = %err,
+                        "setattr path truncate denied by immutable path"
+                    );
+                    reply.error(errno);
                     return;
                 }
                 safe_open::truncate(&resolved.entry.target, &resolved.relative, size)
             };
             if let Err(err) = result {
-                reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO)));
+                let raw_errno = raw_os_errno(&err);
+                debug!(
+                    operation = "setattr",
+                    ino = ino.0,
+                    file_handle = ?fh.map(|fh| fh.0),
+                    portal_path = %portal_path_to_pathbuf(&path).display(),
+                    entry = %resolved.entry.name,
+                    entry_target = %resolved.entry.target.display(),
+                    relative_path = %resolved.relative.display(),
+                    target = %resolved.target.display(),
+                    size = size,
+                    raw_os_errno = raw_errno,
+                    error = %err,
+                    "setattr truncate failed"
+                );
+                reply.error(Errno::from_i32(raw_errno));
                 return;
             }
         }
@@ -498,9 +639,40 @@ impl Filesystem for PortalFs {
             if use_fd.is_none()
                 && let Err(err) = ensure_mutable_relative_path(&state, &resolved.relative)
             {
-                reply.error(mutation_permission_errno(&err, Errno::EROFS));
+                let errno = mutation_permission_errno(&err, Errno::EROFS);
+                debug!(
+                    operation = "setattr",
+                    ino = ino.0,
+                    file_handle = ?fh.map(|fh| fh.0),
+                    portal_path = %portal_path_to_pathbuf(&path).display(),
+                    entry = %resolved.entry.name,
+                    entry_target = %resolved.entry.target.display(),
+                    relative_path = %resolved.relative.display(),
+                    target = %resolved.target.display(),
+                    atime_requested = atime.is_some(),
+                    mtime_requested = mtime.is_some(),
+                    errno = ?errno,
+                    error = %err,
+                    "setattr timestamp change denied by immutable path"
+                );
+                reply.error(errno);
                 return;
             }
+
+            debug!(
+                operation = "setattr",
+                ino = ino.0,
+                file_handle = ?fh.map(|fh| fh.0),
+                portal_path = %portal_path_to_pathbuf(&path).display(),
+                entry = %resolved.entry.name,
+                entry_target = %resolved.entry.target.display(),
+                relative_path = %resolved.relative.display(),
+                target = %resolved.target.display(),
+                atime_requested = atime.is_some(),
+                mtime_requested = mtime.is_some(),
+                timestamp_method = if use_fd.is_some() { "futimens" } else { "set_times" },
+                "setattr applying timestamps"
+            );
 
             let result: std::io::Result<()> = if let Some(fd) = use_fd {
                 let rc = unsafe { libc::futimens(fd, times.as_ptr()) };
@@ -514,14 +686,59 @@ impl Filesystem for PortalFs {
             };
 
             if let Err(err) = result {
-                reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO)));
+                let raw_errno = raw_os_errno(&err);
+                debug!(
+                    operation = "setattr",
+                    ino = ino.0,
+                    file_handle = ?fh.map(|fh| fh.0),
+                    portal_path = %portal_path_to_pathbuf(&path).display(),
+                    entry = %resolved.entry.name,
+                    entry_target = %resolved.entry.target.display(),
+                    relative_path = %resolved.relative.display(),
+                    target = %resolved.target.display(),
+                    atime_requested = atime.is_some(),
+                    mtime_requested = mtime.is_some(),
+                    timestamp_method = if use_fd.is_some() { "futimens" } else { "set_times" },
+                    raw_os_errno = raw_errno,
+                    error = %err,
+                    "setattr timestamp update failed"
+                );
+                reply.error(Errno::from_i32(raw_errno));
                 return;
             }
         }
 
         match current_attr(&mut runtime, &state, &path) {
-            Ok(attr) => reply.attr(&TTL, &attr),
-            Err(_) => reply.error(Errno::EIO),
+            Ok(attr) => {
+                debug!(
+                    operation = "setattr",
+                    ino = ino.0,
+                    file_handle = ?fh.map(|fh| fh.0),
+                    portal_path = %portal_path_to_pathbuf(&path).display(),
+                    entry = %resolved.entry.name,
+                    entry_target = %resolved.entry.target.display(),
+                    relative_path = %resolved.relative.display(),
+                    target = %resolved.target.display(),
+                    "setattr succeeded"
+                );
+                reply.attr(&TTL, &attr)
+            }
+            Err(err) => {
+                debug!(
+                    operation = "setattr",
+                    ino = ino.0,
+                    file_handle = ?fh.map(|fh| fh.0),
+                    portal_path = %portal_path_to_pathbuf(&path).display(),
+                    entry = %resolved.entry.name,
+                    entry_target = %resolved.entry.target.display(),
+                    relative_path = %resolved.relative.display(),
+                    target = %resolved.target.display(),
+                    errno = ?Errno::EIO,
+                    error = %err,
+                    "setattr current_attr failed"
+                );
+                reply.error(Errno::EIO)
+            }
         }
     }
 
@@ -668,6 +885,13 @@ impl Filesystem for PortalFs {
     ) {
         let state = self.state.read().unwrap().clone();
         if parent == ROOT_INO {
+            debug!(
+                operation = "create",
+                parent = parent.0,
+                name = ?name,
+                errno = ?Errno::EPERM,
+                "create denied at root parent"
+            );
             reply.error(Errno::EPERM);
             return;
         }
@@ -677,7 +901,16 @@ impl Filesystem for PortalFs {
         let (path, resolved) = match runtime.resolve_parent_child_writable(&state, parent, &name) {
             Ok(value) => value,
             Err(err) => {
-                reply.error(mutation_permission_errno(&err, Errno::EACCES));
+                let errno = mutation_permission_errno(&err, Errno::EACCES);
+                debug!(
+                    operation = "create",
+                    parent = parent.0,
+                    name = ?name,
+                    errno = ?errno,
+                    error = %err,
+                    "create resolve_parent_child_writable failed"
+                );
+                reply.error(errno);
                 return;
             }
         };
@@ -686,12 +919,30 @@ impl Filesystem for PortalFs {
         if flags & libc::O_TRUNC != 0 {
             oflags |= libc::O_TRUNC;
         }
+        let create_mode = ((mode & !umask) & 0o7777) as libc::mode_t;
+
+        debug!(
+            operation = "create",
+            parent = parent.0,
+            name = ?name,
+            portal_path = %portal_path_to_pathbuf(&path).display(),
+            entry = %resolved.entry.name,
+            entry_target = %resolved.entry.target.display(),
+            relative_path = %resolved.relative.display(),
+            target = %resolved.target.display(),
+            mode = mode,
+            umask = umask,
+            create_mode = create_mode,
+            flags = flags,
+            open_flags = oflags,
+            "create resolved before create_file"
+        );
 
         match safe_open::create_file(
             &resolved.entry.target,
             &resolved.relative,
             oflags,
-            ((mode & !umask) & 0o7777) as libc::mode_t,
+            create_mode,
         ) {
             Ok(file) => {
                 let ino = runtime.remember_lookup(path.clone());
@@ -699,7 +950,21 @@ impl Filesystem for PortalFs {
                 let metadata = match safe_open::lstat(&resolved.entry.target, &resolved.relative) {
                     Ok(metadata) => metadata,
                     Err(err) => {
-                        reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO)));
+                        let raw_errno = raw_os_errno(&err);
+                        debug!(
+                            operation = "create",
+                            parent = parent.0,
+                            name = ?name,
+                            portal_path = %portal_path_to_pathbuf(&path).display(),
+                            entry = %resolved.entry.name,
+                            entry_target = %resolved.entry.target.display(),
+                            relative_path = %resolved.relative.display(),
+                            target = %resolved.target.display(),
+                            raw_os_errno = raw_errno,
+                            error = %err,
+                            "create lstat failed after create_file"
+                        );
+                        reply.error(Errno::from_i32(raw_errno));
                         return;
                     }
                 };
@@ -716,8 +981,37 @@ impl Filesystem for PortalFs {
                     fh,
                     FopenFlags::empty(),
                 );
+                debug!(
+                    operation = "create",
+                    parent = parent.0,
+                    name = ?name,
+                    portal_path = %portal_path_to_pathbuf(&path).display(),
+                    entry = %resolved.entry.name,
+                    entry_target = %resolved.entry.target.display(),
+                    relative_path = %resolved.relative.display(),
+                    target = %resolved.target.display(),
+                    ino = ino.0,
+                    file_handle = fh.0,
+                    "create succeeded"
+                );
             }
-            Err(err) => reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO))),
+            Err(err) => {
+                let raw_errno = raw_os_errno(&err);
+                debug!(
+                    operation = "create",
+                    parent = parent.0,
+                    name = ?name,
+                    portal_path = %portal_path_to_pathbuf(&path).display(),
+                    entry = %resolved.entry.name,
+                    entry_target = %resolved.entry.target.display(),
+                    relative_path = %resolved.relative.display(),
+                    target = %resolved.target.display(),
+                    raw_os_errno = raw_errno,
+                    error = %err,
+                    "create_file failed"
+                );
+                reply.error(Errno::from_i32(raw_errno))
+            }
         }
     }
 
@@ -732,6 +1026,13 @@ impl Filesystem for PortalFs {
     ) {
         let state = self.state.read().unwrap().clone();
         if parent == ROOT_INO {
+            debug!(
+                operation = "mkdir",
+                parent = parent.0,
+                name = ?name,
+                errno = ?Errno::EPERM,
+                "mkdir denied at root parent"
+            );
             reply.error(Errno::EPERM);
             return;
         }
@@ -741,29 +1042,81 @@ impl Filesystem for PortalFs {
         let (path, resolved) = match runtime.resolve_parent_child_writable(&state, parent, &name) {
             Ok(value) => value,
             Err(err) => {
-                reply.error(mutation_permission_errno(&err, Errno::EACCES));
+                let errno = mutation_permission_errno(&err, Errno::EACCES);
+                debug!(
+                    operation = "mkdir",
+                    parent = parent.0,
+                    name = ?name,
+                    errno = ?errno,
+                    error = %err,
+                    "mkdir resolve_parent_child_writable failed"
+                );
+                reply.error(errno);
                 return;
             }
         };
 
         let dir_mode = ((mode & !umask) & 0o7777) as libc::mode_t;
+        debug!(
+            operation = "mkdir",
+            parent = parent.0,
+            name = ?name,
+            portal_path = %portal_path_to_pathbuf(&path).display(),
+            entry = %resolved.entry.name,
+            entry_target = %resolved.entry.target.display(),
+            relative_path = %resolved.relative.display(),
+            target = %resolved.target.display(),
+            mode = mode,
+            umask = umask,
+            dir_mode = dir_mode,
+            "mkdir resolved before mkdir"
+        );
+
         match safe_open::mkdir(&resolved.entry.target, &resolved.relative, dir_mode) {
             Ok(()) => {
                 // Force the requested permissions (mkdirat applies the umask).
                 if let Err(err) =
                     safe_open::chmod(&resolved.entry.target, &resolved.relative, dir_mode)
                 {
-                    reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO)));
+                    let raw_errno = raw_os_errno(&err);
+                    debug!(
+                        operation = "mkdir",
+                        parent = parent.0,
+                        name = ?name,
+                        portal_path = %portal_path_to_pathbuf(&path).display(),
+                        entry = %resolved.entry.name,
+                        entry_target = %resolved.entry.target.display(),
+                        relative_path = %resolved.relative.display(),
+                        target = %resolved.target.display(),
+                        raw_os_errno = raw_errno,
+                        error = %err,
+                        "mkdir chmod failed"
+                    );
+                    reply.error(Errno::from_i32(raw_errno));
                     return;
                 }
                 let metadata = match safe_open::lstat(&resolved.entry.target, &resolved.relative) {
                     Ok(metadata) => metadata,
                     Err(err) => {
-                        reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO)));
+                        let raw_errno = raw_os_errno(&err);
+                        debug!(
+                            operation = "mkdir",
+                            parent = parent.0,
+                            name = ?name,
+                            portal_path = %portal_path_to_pathbuf(&path).display(),
+                            entry = %resolved.entry.name,
+                            entry_target = %resolved.entry.target.display(),
+                            relative_path = %resolved.relative.display(),
+                            target = %resolved.target.display(),
+                            raw_os_errno = raw_errno,
+                            error = %err,
+                            "mkdir lstat failed after mkdir"
+                        );
+                        reply.error(Errno::from_i32(raw_errno));
                         return;
                     }
                 };
-                let ino = runtime.remember_lookup(path);
+                let ino = runtime.remember_lookup(path.clone());
                 let attr = attr_from_metadata(
                     ino,
                     &metadata,
@@ -771,8 +1124,36 @@ impl Filesystem for PortalFs {
                     0,
                 );
                 reply.entry(&TTL, &attr, Generation(resolved.entry.generation));
+                debug!(
+                    operation = "mkdir",
+                    parent = parent.0,
+                    name = ?name,
+                    portal_path = %portal_path_to_pathbuf(&path).display(),
+                    entry = %resolved.entry.name,
+                    entry_target = %resolved.entry.target.display(),
+                    relative_path = %resolved.relative.display(),
+                    target = %resolved.target.display(),
+                    ino = ino.0,
+                    "mkdir succeeded"
+                );
             }
-            Err(err) => reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO))),
+            Err(err) => {
+                let raw_errno = raw_os_errno(&err);
+                debug!(
+                    operation = "mkdir",
+                    parent = parent.0,
+                    name = ?name,
+                    portal_path = %portal_path_to_pathbuf(&path).display(),
+                    entry = %resolved.entry.name,
+                    entry_target = %resolved.entry.target.display(),
+                    relative_path = %resolved.relative.display(),
+                    target = %resolved.target.display(),
+                    raw_os_errno = raw_errno,
+                    error = %err,
+                    "safe_open::mkdir failed"
+                );
+                reply.error(Errno::from_i32(raw_errno))
+            }
         }
     }
 

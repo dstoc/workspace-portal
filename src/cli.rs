@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{env, path::PathBuf};
 
 use clap::{Parser, Subcommand};
 
@@ -192,8 +192,12 @@ pub struct EditCommand {
 }
 
 pub async fn run() -> Result<()> {
-    init_tracing();
     let cli = Cli::parse();
+    let log_level = match &cli.command {
+        Commands::Start(cmd) => cmd.log_level.as_deref(),
+        _ => None,
+    };
+    init_tracing(log_level);
 
     match cli.command {
         Commands::Start(cmd) => {
@@ -305,11 +309,15 @@ fn validate_thaw(cmd: &ThawCommand) -> Result<()> {
     crate::paths::validate_immutable_segment_name(&cmd.segment)
 }
 
-fn init_tracing() {
+fn init_tracing(log_level: Option<&str>) {
+    let env_filter = if env::var_os("RUST_LOG").is_some() {
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+    } else {
+        tracing_subscriber::EnvFilter::new(log_level.unwrap_or("info"))
+    };
+
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
+        .with_env_filter(env_filter)
         .try_init();
 }

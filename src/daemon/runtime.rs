@@ -9,14 +9,14 @@ use std::{
     },
 };
 
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::{
     error::{Error, Result},
     fs::PortalFs,
     paths,
     protocol::{self, ControlRequest, ControlResponse, ProtocolErrorCode},
-    state::{DaemonStatus, EntryRecord, PortalState},
+    state::{AccessMode, DaemonStatus, EntryRecord, PortalState},
 };
 
 use super::{mount::wait_for_mount_state, workspace::persist_workspace_state};
@@ -117,13 +117,14 @@ impl Daemon {
         }
 
         let request = protocol::decode_request(line.trim_end())?;
-        let response = match self.handle_request(request) {
+        let response = match self.handle_request(request.clone()) {
             Ok(response) => response,
             Err(err) => ControlResponse::Error {
                 code: protocol_error_code(&err),
                 error: err.to_string(),
             },
         };
+        trace_control_request_result(&request, &response);
 
         let encoded = format!("{}\n", protocol::encode_response(&response)?);
         stream.write_all(encoded.as_bytes())?;
@@ -273,6 +274,248 @@ fn protocol_error_code(error: &Error) -> ProtocolErrorCode {
         Error::StateCorrupt(_) => ProtocolErrorCode::StaleState,
         Error::Cli(_) | Error::Protocol(_) | Error::Unsupported(_) => ProtocolErrorCode::Internal,
         Error::Io(_) | Error::Json(_) | Error::InvalidWorkspace(_) => ProtocolErrorCode::Internal,
+    }
+}
+
+fn trace_control_request_result(request: &ControlRequest, response: &ControlResponse) {
+    match request {
+        ControlRequest::Add {
+            name,
+            target,
+            mode,
+            replace,
+        } => match response {
+            ControlResponse::Ack { .. } => {
+                debug!(
+                    operation = "add",
+                    entry_name = %name,
+                    target_path = %target.display(),
+                    access_mode = access_mode_label(*mode),
+                    replace = *replace,
+                    result = "ok",
+                    response = "ack",
+                    "control request result"
+                );
+            }
+            ControlResponse::Status { .. } => {
+                debug!(
+                    operation = "add",
+                    entry_name = %name,
+                    target_path = %target.display(),
+                    access_mode = access_mode_label(*mode),
+                    replace = *replace,
+                    result = "ok",
+                    response = "status",
+                    "control request result"
+                );
+            }
+            ControlResponse::Error { code, error } => {
+                debug!(
+                    operation = "add",
+                    entry_name = %name,
+                    target_path = %target.display(),
+                    access_mode = access_mode_label(*mode),
+                    replace = *replace,
+                    result = "error",
+                    error_code = protocol_error_code_label(code),
+                    error = %error,
+                    "control request result"
+                );
+            }
+        },
+        ControlRequest::Freeze { segment } => match response {
+            ControlResponse::Ack { .. } => {
+                debug!(
+                    operation = "freeze",
+                    immutable_segment = %segment,
+                    result = "ok",
+                    response = "ack",
+                    "control request result"
+                );
+            }
+            ControlResponse::Status { .. } => {
+                debug!(
+                    operation = "freeze",
+                    immutable_segment = %segment,
+                    result = "ok",
+                    response = "status",
+                    "control request result"
+                );
+            }
+            ControlResponse::Error { code, error } => {
+                debug!(
+                    operation = "freeze",
+                    immutable_segment = %segment,
+                    result = "error",
+                    error_code = protocol_error_code_label(code),
+                    error = %error,
+                    "control request result"
+                );
+            }
+        },
+        ControlRequest::Remove { name } => match response {
+            ControlResponse::Ack { .. } => {
+                debug!(
+                    operation = "remove",
+                    entry_name = %name,
+                    result = "ok",
+                    response = "ack",
+                    "control request result"
+                );
+            }
+            ControlResponse::Status { .. } => {
+                debug!(
+                    operation = "remove",
+                    entry_name = %name,
+                    result = "ok",
+                    response = "status",
+                    "control request result"
+                );
+            }
+            ControlResponse::Error { code, error } => {
+                debug!(
+                    operation = "remove",
+                    entry_name = %name,
+                    result = "error",
+                    error_code = protocol_error_code_label(code),
+                    error = %error,
+                    "control request result"
+                );
+            }
+        },
+        ControlRequest::Thaw { segment } => match response {
+            ControlResponse::Ack { .. } => {
+                debug!(
+                    operation = "thaw",
+                    immutable_segment = %segment,
+                    result = "ok",
+                    response = "ack",
+                    "control request result"
+                );
+            }
+            ControlResponse::Status { .. } => {
+                debug!(
+                    operation = "thaw",
+                    immutable_segment = %segment,
+                    result = "ok",
+                    response = "status",
+                    "control request result"
+                );
+            }
+            ControlResponse::Error { code, error } => {
+                debug!(
+                    operation = "thaw",
+                    immutable_segment = %segment,
+                    result = "error",
+                    error_code = protocol_error_code_label(code),
+                    error = %error,
+                    "control request result"
+                );
+            }
+        },
+        ControlRequest::Status => match response {
+            ControlResponse::Ack { .. } => {
+                debug!(
+                    operation = "status",
+                    result = "ok",
+                    response = "ack",
+                    "control request result"
+                );
+            }
+            ControlResponse::Status { .. } => {
+                debug!(
+                    operation = "status",
+                    result = "ok",
+                    response = "status",
+                    "control request result"
+                );
+            }
+            ControlResponse::Error { code, error } => {
+                debug!(
+                    operation = "status",
+                    result = "error",
+                    error_code = protocol_error_code_label(code),
+                    error = %error,
+                    "control request result"
+                );
+            }
+        },
+        ControlRequest::Stop => match response {
+            ControlResponse::Ack { .. } => {
+                debug!(
+                    operation = "stop",
+                    result = "ok",
+                    response = "ack",
+                    "control request result"
+                );
+            }
+            ControlResponse::Status { .. } => {
+                debug!(
+                    operation = "stop",
+                    result = "ok",
+                    response = "status",
+                    "control request result"
+                );
+            }
+            ControlResponse::Error { code, error } => {
+                debug!(
+                    operation = "stop",
+                    result = "error",
+                    error_code = protocol_error_code_label(code),
+                    error = %error,
+                    "control request result"
+                );
+            }
+        },
+        ControlRequest::Ping => match response {
+            ControlResponse::Ack { .. } => {
+                debug!(
+                    operation = "ping",
+                    result = "ok",
+                    response = "ack",
+                    "control request result"
+                );
+            }
+            ControlResponse::Status { .. } => {
+                debug!(
+                    operation = "ping",
+                    result = "ok",
+                    response = "status",
+                    "control request result"
+                );
+            }
+            ControlResponse::Error { code, error } => {
+                debug!(
+                    operation = "ping",
+                    result = "error",
+                    error_code = protocol_error_code_label(code),
+                    error = %error,
+                    "control request result"
+                );
+            }
+        },
+    }
+}
+
+fn access_mode_label(mode: AccessMode) -> &'static str {
+    match mode {
+        AccessMode::ReadOnly => "ro",
+        AccessMode::ReadWrite => "rw",
+    }
+}
+
+fn protocol_error_code_label(code: &ProtocolErrorCode) -> &'static str {
+    match code {
+        ProtocolErrorCode::EntryExists => "entry_exists",
+        ProtocolErrorCode::EntryNotFound => "entry_not_found",
+        ProtocolErrorCode::InvalidName => "invalid_name",
+        ProtocolErrorCode::InvalidTarget => "invalid_target",
+        ProtocolErrorCode::PermissionDenied => "permission_denied",
+        ProtocolErrorCode::StaleState => "stale_state",
+        ProtocolErrorCode::WorkspaceNotFound => "workspace_not_found",
+        ProtocolErrorCode::DaemonNotRunning => "daemon_not_running",
+        ProtocolErrorCode::DaemonAlreadyRunning => "daemon_already_running",
+        ProtocolErrorCode::Internal => "internal",
     }
 }
 
