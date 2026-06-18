@@ -281,22 +281,6 @@ pub(crate) fn rename(entry_root: &Path, source: &Path, destination: &Path) -> io
     })
 }
 
-/// Hard link within a single entry. `linkat` with flags `0` does not follow a
-/// symlink source.
-pub(crate) fn hard_link(entry_root: &Path, source: &Path, destination: &Path) -> io::Result<()> {
-    let (src_parent, src_leaf) = open_parent(entry_root, source)?;
-    let (dst_parent, dst_leaf) = open_parent(entry_root, destination)?;
-    check(unsafe {
-        libc::linkat(
-            src_parent.as_raw_fd(),
-            src_leaf.as_ptr(),
-            dst_parent.as_raw_fd(),
-            dst_leaf.as_ptr(),
-            0,
-        )
-    })
-}
-
 /// `chmod` the inode `relative` resolves to, confined beneath the entry root.
 pub(crate) fn chmod(entry_root: &Path, relative: &Path, mode: libc::mode_t) -> io::Result<()> {
     // Resolve to a confined O_PATH fd (following in-entry symlinks but never

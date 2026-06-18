@@ -49,6 +49,17 @@ fn output_text(output: &Output) -> String {
     text
 }
 
+fn assert_unsupported_operation(err: &std::io::Error) {
+    assert!(
+        err.kind() == ErrorKind::Unsupported
+            || matches!(
+                err.raw_os_error(),
+                Some(code) if code == libc::EOPNOTSUPP || code == libc::ENOTSUP
+            ),
+        "expected unsupported operation, got {err:?}"
+    );
+}
+
 fn wait_for(timeout: Duration, mut predicate: impl FnMut() -> bool) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -863,24 +874,25 @@ fn fuse_e2e_hard_link_and_copy_cover_rustc_style_file_duplication() -> Result<()
     let mounted_source = fixture.workspace.join("docs/source.bin");
     let mounted_link = fixture.workspace.join("docs/source-link.bin");
     let mounted_copy = fixture.workspace.join("docs/source-copy.bin");
+    let host_link = fixture.docs_target.join("source-host-link.bin");
+    let host_link_mounted = fixture.workspace.join("docs/source-host-link.bin");
+    let host_destination = fixture.docs_target.join("source-link.bin");
 
     fs::write(&mounted_source, "alpha-beta-gamma")?;
 
-    fs::hard_link(&mounted_source, &mounted_link)?;
-    assert_eq!(fs::read_to_string(&mounted_link)?, "alpha-beta-gamma");
+    fs::hard_link(&fixture.docs_target.join("source.bin"), &host_link)?;
+    assert_eq!(fs::read_to_string(&host_link_mounted)?, "alpha-beta-gamma");
 
-    fs::write(&mounted_link, "hard-link-updated")?;
-    assert_eq!(fs::read_to_string(&mounted_source)?, "hard-link-updated");
-    assert_eq!(
-        fs::read_to_string(fixture.docs_target.join("source.bin"))?,
-        "hard-link-updated"
-    );
+    let hard_link_err = fs::hard_link(&mounted_source, &mounted_link).unwrap_err();
+    assert_unsupported_operation(&hard_link_err);
+    assert!(!mounted_link.exists());
+    assert!(!host_destination.exists());
 
     fs::copy(&mounted_source, &mounted_copy)?;
-    assert_eq!(fs::read_to_string(&mounted_copy)?, "hard-link-updated");
+    assert_eq!(fs::read_to_string(&mounted_copy)?, "alpha-beta-gamma");
     assert_eq!(
         fs::read_to_string(fixture.docs_target.join("source-copy.bin"))?,
-        "hard-link-updated"
+        "alpha-beta-gamma"
     );
 
     let stop = run(

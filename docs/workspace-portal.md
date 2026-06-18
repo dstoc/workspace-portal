@@ -442,7 +442,6 @@ development workflows:
 - create
 - mkdir
 - symlink
-- link (same-entry hard links; cross-entry returns `EXDEV`)
 - unlink
 - rmdir
 - rename
@@ -452,7 +451,7 @@ development workflows:
 - flush
 - release
 - fsync
-- copy_file_range (with a manual read/write fallback)
+- copy and copy_file_range (with a manual read/write fallback)
 - releasedir
 - fsyncdir
 - statfs (reports the backing store's real capacity)
@@ -526,7 +525,7 @@ Current FUSE E2E coverage includes:
 - rename destination is immediately openable
 - symlink traversal and broken-symlink behavior
 - symlink creation
-- hard-link and copy_file_range (rustc-style file duplication)
+- copy and copy_file_range (rustc-style file duplication)
 - statfs backing-capacity reporting
 - setattr timestamp persistence
 - soft revocation/coherency checks

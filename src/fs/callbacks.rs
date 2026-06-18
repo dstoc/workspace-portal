@@ -1383,88 +1383,12 @@ impl Filesystem for PortalFs {
     fn link(
         &self,
         _req: &Request,
-        ino: INodeNo,
-        newparent: INodeNo,
-        newname: &std::ffi::OsStr,
+        _ino: INodeNo,
+        _newparent: INodeNo,
+        _newname: &std::ffi::OsStr,
         reply: ReplyEntry,
     ) {
-        let state = self.state.read().unwrap().clone();
-        if newparent == ROOT_INO {
-            reply.error(Errno::EPERM);
-            return;
-        }
-
-        let mut runtime = self.runtime.lock().unwrap();
-        let Some(source_path) = runtime.path_for_inode(&state, ino) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
-        let source_resolved = match state_for_path(&state, &source_path) {
-            Ok(resolved) => resolved,
-            Err(err) => {
-                reply.error(errno_from_error(&err));
-                return;
-            }
-        };
-        if let Err(err) = ensure_mutable_relative_path(&state, &source_resolved.relative) {
-            reply.error(mutation_permission_errno(&err, Errno::EACCES));
-            return;
-        }
-
-        let target_name = newname.to_os_string();
-        let (target_path, target_resolved) =
-            match runtime.resolve_parent_child_writable(&state, newparent, &target_name) {
-                Ok(value) => value,
-                Err(err) => {
-                    reply.error(mutation_permission_errno(&err, Errno::EACCES));
-                    return;
-                }
-            };
-
-        if source_resolved.entry.name != target_resolved.entry.name {
-            reply.error(Errno::EXDEV);
-            return;
-        }
-
-        match safe_open::lstat(&source_resolved.entry.target, &source_resolved.relative) {
-            Ok(metadata) if metadata.file_type().is_dir() => {
-                reply.error(Errno::EPERM);
-                return;
-            }
-            Ok(_) => {}
-            Err(err) => {
-                reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO)));
-                return;
-            }
-        }
-
-        match safe_open::hard_link(
-            &target_resolved.entry.target,
-            &source_resolved.relative,
-            &target_resolved.relative,
-        ) {
-            Ok(()) => {
-                let metadata = match safe_open::lstat(
-                    &target_resolved.entry.target,
-                    &target_resolved.relative,
-                ) {
-                    Ok(metadata) => metadata,
-                    Err(err) => {
-                        reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO)));
-                        return;
-                    }
-                };
-                let ino = runtime.remember_lookup(target_path);
-                let attr = attr_from_metadata(
-                    ino,
-                    &metadata,
-                    entry_is_read_only(&target_resolved.entry, state.read_only_default),
-                    0,
-                );
-                reply.entry(&TTL, &attr, Generation(target_resolved.entry.generation));
-            }
-            Err(err) => reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO))),
-        }
+        reply.error(Errno::EOPNOTSUPP);
     }
 
     fn read(
