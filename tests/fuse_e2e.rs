@@ -110,6 +110,11 @@ fn looks_like_mount_permission_error(text: &str) -> bool {
     .any(|needle| text.contains(needle))
 }
 
+fn looks_like_nosymfollow_unsupported_error(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    text.contains("nosymfollow") && (text.contains("invalid argument") || text.contains("einval"))
+}
+
 struct Fixture {
     root: PathBuf,
     workspace: PathBuf,
@@ -453,6 +458,12 @@ fn fuse_e2e_nosymfollow_keeps_symlinks_visible_but_blocks_traversal() -> Result<
         &["start", &fixture.workspace_arg(), "--bg", "--nosymfollow"],
         &fixture.envs(),
     );
+    if !start.status.success() && looks_like_nosymfollow_unsupported_error(&output_text(&start)) {
+        eprintln!(
+            "skipping nosymfollow FUSE E2E because this kernel/FUSE mount path rejects the nosymfollow mount option"
+        );
+        return Ok(());
+    }
     assert!(start.status.success(), "{}", output_text(&start));
     wait_for_mounted_state(&fixture, true);
 
