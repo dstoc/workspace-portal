@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.1.4](https://github.com/dstoc/workspace-portal/compare/workspace-portal-v0.1.3...workspace-portal-v0.1.4) (2026-06-18)
+
+
+### Features
+
+* add --nosymfollow ([bff93ca](https://github.com/dstoc/workspace-portal/commit/bff93caa60c996478cb6405668901d698e06a6cb))
+* disable hard links ([0bdf34d](https://github.com/dstoc/workspace-portal/commit/0bdf34db21ab4709433f6cf1ab3e3a9bb5466ee3))
+
+
+### Bug Fixes
+
+* ignore nosymfollow e2e when unsupported ([f904500](https://github.com/dstoc/workspace-portal/commit/f9045007edc6f304663ce13e1c502cc3f43b0f5d))
+* skip nosymfollow FUSE e2e when mount stack rejects option ([13d09f8](https://github.com/dstoc/workspace-portal/commit/13d09f87a5ebd01c6e1260fb2de5de06716dd29e))
+
+
+### Miscellaneous Chores
+
+* release 0.1.4 ([77da55e](https://github.com/dstoc/workspace-portal/commit/77da55e146a18d29df11387e37cc477f87d9071b))
+
 ## [0.1.3](https://github.com/dstoc/workspace-portal/compare/workspace-portal-v0.1.2...workspace-portal-v0.1.3) (2026-06-17)
 
 
