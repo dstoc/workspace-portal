@@ -119,7 +119,7 @@ workspace-portal stop --workspace ./workspace
 Start the daemon and mount a workspace:
 
 ```bash
-workspace-portal start <workspace> [--bg] [--read-only]
+workspace-portal start <workspace> [--bg] [--read-only] [--nosymfollow]
 ```
 
 Options:
@@ -130,6 +130,8 @@ Options:
 - `--allow-other` enables FUSE `allow_other`
 - `--no-allow-other` disables it explicitly
 - `--read-only` makes the workspace read-only by default
+- `--nosymfollow` keeps symlinks visible and readable with `readlink`, but
+  disables traversal through symlink components in the mount
 - `--adopt` uses an existing workspace directory
 - `--force` overrides stale state or mount conditions
 

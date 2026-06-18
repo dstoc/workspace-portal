@@ -41,6 +41,7 @@ pub struct StartArgs {
     pub daemon_child: bool,
     pub allow_other: bool,
     pub read_only: bool,
+    pub nosymfollow: bool,
     pub adopt: bool,
     pub force: bool,
     pub log_level: Option<String>,
@@ -157,6 +158,7 @@ pub async fn start(args: StartArgs) -> Result<()> {
         state_path: workspace_ctx.state_path.clone(),
         registry_path: workspace_ctx.registry_path.clone(),
         allow_other: args.allow_other,
+        nosymfollow: args.nosymfollow,
     });
 
     let mut join_handle = tokio::task::spawn_blocking(move || daemon.run());

@@ -40,6 +40,23 @@ pub struct PortalFs {
     runtime: Mutex<runtime::FuseRuntime>,
 }
 
+pub(crate) fn build_mount_config(allow_other: bool, nosymfollow: bool) -> FuserConfig {
+    let mut config = FuserConfig::default();
+    config
+        .mount_options
+        .push(MountOption::FSName("workspace-portal".to_owned()));
+    if allow_other {
+        config.acl = SessionACL::All;
+        config.mount_options.push(MountOption::DefaultPermissions);
+    }
+    if nosymfollow {
+        config
+            .mount_options
+            .push(MountOption::CUSTOM("nosymfollow".to_owned()));
+    }
+    config
+}
+
 impl PortalFs {
     pub fn new(state: Arc<RwLock<PortalState>>) -> Self {
         let config = {
@@ -122,15 +139,40 @@ impl PortalFs {
         resolve::ensure_writable_entry(entry)
     }
 
-    pub fn mount(self, mountpoint: &Path, allow_other: bool) -> Result<fuser::BackgroundSession> {
-        let mut config = FuserConfig::default();
-        config
-            .mount_options
-            .push(MountOption::FSName("workspace-portal".to_owned()));
-        if allow_other {
-            config.acl = SessionACL::All;
-            config.mount_options.push(MountOption::DefaultPermissions);
-        }
+    pub fn mount(
+        self,
+        mountpoint: &Path,
+        allow_other: bool,
+        nosymfollow: bool,
+    ) -> Result<fuser::BackgroundSession> {
+        let config = build_mount_config(allow_other, nosymfollow);
         Ok(fuser::spawn_mount2(self, mountpoint, &config)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_mount_config_omits_nosymfollow_by_default() {
+        let config = build_mount_config(false, false);
+
+        assert!(
+            !config
+                .mount_options
+                .contains(&MountOption::CUSTOM("nosymfollow".to_owned()))
+        );
+    }
+
+    #[test]
+    fn build_mount_config_includes_nosymfollow_when_enabled() {
+        let config = build_mount_config(false, true);
+
+        assert!(
+            config
+                .mount_options
+                .contains(&MountOption::CUSTOM("nosymfollow".to_owned()))
+        );
     }
 }

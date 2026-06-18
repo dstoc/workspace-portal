@@ -104,7 +104,7 @@ Current behavior:
 ### `start`
 
 ```bash
-workspace-portal start <workspace> [--bg] [--read-only]
+workspace-portal start <workspace> [--bg] [--read-only] [--nosymfollow]
 ```
 
 Current behavior:
@@ -115,6 +115,7 @@ Current behavior:
 - persists workspace state under the XDG state root
 - starts in the foreground by default
 - supports `--bg` for background daemonization
+- supports `--nosymfollow` for mount-wide symlink traversal control
 
 Supported options:
 
@@ -125,6 +126,7 @@ Supported options:
 --allow-other
 --no-allow-other
 --read-only
+--nosymfollow
 --adopt
 --force
 --log-level <level>
@@ -133,6 +135,8 @@ Supported options:
 Notes:
 
 - `--allow-other` is passed through to the FUSE mount configuration
+- `--nosymfollow` applies to the whole mount, not an individual entry; it is
+  not stored in entry state or persisted as part of the workspace registry
 - workspace discovery and restart behavior now rely on persisted registry state,
   not a marker file inside the workspace
 
@@ -403,13 +407,15 @@ Example:
 
 Current behavior:
 
-- symlinks within a target are visible through the portal
-- `readlink` is implemented
-- symlink traversal works
+- by default, symlinks within a target are visible through the portal,
+  `readlink` is implemented, and symlink traversal works
+- with `--nosymfollow`, symlinks remain visible and `readlink` still returns
+  the stored link text, but path traversal through symlink components is
+  disabled by the mount
 - broken symlinks remain visible as symlinks and reads fail with `ENOENT`
 
-There is no stronger subtree-confinement policy yet beyond current path parsing
-and target canonicalization.
+Daemon-side `safe_open` confinement is a separate host-path protection; `--nosymfollow`
+controls consumer-side traversal through symlinks in the mounted workspace.
 
 ### Read-only entries
 

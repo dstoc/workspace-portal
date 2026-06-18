@@ -185,6 +185,17 @@ fn cli_validation_rejects_conflicting_flags() {
 }
 
 #[test]
+fn start_help_lists_nosymfollow_flag() {
+    let envs: [(&str, &Path); 0] = [];
+    let help = run(&["start", "--help"], &envs);
+
+    assert!(help.status.success(), "{}", output_text(&help));
+    let text = output_text(&help);
+    assert!(text.contains("--nosymfollow"));
+    assert!(text.contains("Disable symlink traversal through the portal mount"));
+}
+
+#[test]
 fn start_leaves_workspace_empty_before_entries_are_added() -> Result<(), Box<dyn Error>> {
     if !cfg!(target_os = "linux") {
         eprintln!("skipping workspace-emptiness regression test on non-Linux");

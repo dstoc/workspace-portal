@@ -61,6 +61,9 @@ pub struct StartCommand {
     #[arg(long = "read-only", help = "Mount the workspace read-only by default")]
     pub read_only: bool,
 
+    #[arg(long, help = "Disable symlink traversal through the portal mount")]
+    pub nosymfollow: bool,
+
     #[arg(
         long,
         help = "Adopt an existing workspace directory instead of requiring it to be empty"
@@ -210,6 +213,7 @@ pub async fn run() -> Result<()> {
                 daemon_child: cmd.daemon_child,
                 allow_other: cmd.allow_other && !cmd.no_allow_other,
                 read_only: cmd.read_only,
+                nosymfollow: cmd.nosymfollow,
                 adopt: cmd.adopt,
                 force: cmd.force,
                 log_level: cmd.log_level,

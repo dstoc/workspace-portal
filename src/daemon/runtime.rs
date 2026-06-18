@@ -35,6 +35,7 @@ pub(crate) struct DaemonConfig {
     pub(crate) state_path: std::path::PathBuf,
     pub(crate) registry_path: std::path::PathBuf,
     pub(crate) allow_other: bool,
+    pub(crate) nosymfollow: bool,
 }
 
 impl Daemon {
@@ -244,8 +245,11 @@ impl Daemon {
             return Ok(());
         }
 
-        let mount_session = PortalFs::new(self.state.clone())
-            .mount(&self.config.state.workspace, self.config.allow_other)?;
+        let mount_session = PortalFs::new(self.state.clone()).mount(
+            &self.config.state.workspace,
+            self.config.allow_other,
+            self.config.nosymfollow,
+        )?;
         self.mount = Some(mount_session);
         Ok(())
     }
@@ -553,6 +557,7 @@ mod tests {
             state_path: state_path.clone(),
             registry_path,
             allow_other: false,
+            nosymfollow: false,
         });
 
         let response = daemon

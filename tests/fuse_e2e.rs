@@ -421,6 +421,68 @@ fn fuse_e2e_symlinks_cover_traversal_and_broken_targets() -> Result<(), Box<dyn 
 
 #[test]
 #[ignore]
+#[cfg(unix)]
+fn fuse_e2e_nosymfollow_keeps_symlinks_visible_but_blocks_traversal() -> Result<(), Box<dyn Error>>
+{
+    require_fuse_prerequisites();
+
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.docs_target.join("nested"))?;
+    fs::write(
+        fixture.docs_target.join("nested/payload.txt"),
+        "nosymfollow-traversal",
+    )?;
+    symlink(
+        "nested/payload.txt",
+        fixture.docs_target.join("shortcut.txt"),
+    )?;
+    symlink("nested", fixture.docs_target.join("linked-dir"))?;
+
+    let start = run(
+        &["start", &fixture.workspace_arg(), "--bg", "--nosymfollow"],
+        &fixture.envs(),
+    );
+    assert!(start.status.success(), "{}", output_text(&start));
+    wait_for_mounted_state(&fixture, true);
+
+    let add = run(
+        &[
+            "add",
+            &fixture.docs_target_arg(),
+            "docs",
+            "--workspace",
+            &fixture.workspace_arg(),
+            "--rw",
+        ],
+        &fixture.envs(),
+    );
+    assert!(add.status.success(), "{}", output_text(&add));
+
+    let shortcut = fixture.workspace.join("docs/shortcut.txt");
+    assert!(fs::symlink_metadata(&shortcut)?.file_type().is_symlink());
+    assert_eq!(
+        fs::read_link(&shortcut)?,
+        PathBuf::from("nested/payload.txt")
+    );
+    assert!(fs::read_to_string(&shortcut).is_err());
+
+    let linked_dir = fixture.workspace.join("docs/linked-dir");
+    assert!(fs::symlink_metadata(&linked_dir)?.file_type().is_symlink());
+    assert_eq!(fs::read_link(&linked_dir)?, PathBuf::from("nested"));
+    assert!(fs::read_to_string(fixture.workspace.join("docs/linked-dir/payload.txt")).is_err());
+
+    let stop = run(
+        &["stop", "--workspace", &fixture.workspace_arg()],
+        &fixture.envs(),
+    );
+    assert!(stop.status.success(), "{}", output_text(&stop));
+    wait_for_mounted_state(&fixture, false);
+
+    Ok(())
+}
+
+#[test]
+#[ignore]
 fn fuse_e2e_soft_revocation_and_status_coherency_covers_multiple_active_entries()
 -> Result<(), Box<dyn Error>> {
     require_fuse_prerequisites();

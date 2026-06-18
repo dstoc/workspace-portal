@@ -101,6 +101,35 @@ fn format_background_daemon_error(
     PathBuf::from(message)
 }
 
+fn daemon_child_cli_args(args: &StartArgs) -> Vec<String> {
+    let mut cli_args = Vec::new();
+
+    if args.allow_other {
+        cli_args.push("--allow-other".to_owned());
+    } else {
+        cli_args.push("--no-allow-other".to_owned());
+    }
+
+    if args.read_only {
+        cli_args.push("--read-only".to_owned());
+    }
+    if args.nosymfollow {
+        cli_args.push("--nosymfollow".to_owned());
+    }
+    if args.adopt {
+        cli_args.push("--adopt".to_owned());
+    }
+    if args.force {
+        cli_args.push("--force".to_owned());
+    }
+    if let Some(level) = &args.log_level {
+        cli_args.push("--log-level".to_owned());
+        cli_args.push(level.clone());
+    }
+
+    cli_args
+}
+
 pub(crate) fn spawn_background_daemon(args: &StartArgs, ctx: &WorkspaceContext) -> Result<()> {
     let exe = env::current_exe()?;
     let state_root = ctx
@@ -133,23 +162,8 @@ pub(crate) fn spawn_background_daemon(args: &StartArgs, ctx: &WorkspaceContext) 
         .stderr(Stdio::from(stderr.try_clone()?))
         .stdin(Stdio::null());
 
-    if args.allow_other {
-        command.arg("--allow-other");
-    } else {
-        command.arg("--no-allow-other");
-    }
-
-    if args.read_only {
-        command.arg("--read-only");
-    }
-    if args.adopt {
-        command.arg("--adopt");
-    }
-    if args.force {
-        command.arg("--force");
-    }
-    if let Some(level) = &args.log_level {
-        command.arg("--log-level").arg(level);
+    for arg in daemon_child_cli_args(args) {
+        command.arg(arg);
     }
 
     let mut child = command.spawn()?;
@@ -184,4 +198,39 @@ pub(crate) fn spawn_background_daemon(args: &StartArgs, ctx: &WorkspaceContext) 
     let _ = fs::remove_file(&stdout_path);
     let _ = fs::remove_file(&stderr_path);
     Err(Error::DaemonNotRunning(ctx.workspace.clone()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn start_args(nosymfollow: bool) -> StartArgs {
+        StartArgs {
+            workspace: PathBuf::from("/tmp/workspace"),
+            socket: None,
+            state_dir: None,
+            bg: true,
+            daemon_child: false,
+            allow_other: false,
+            read_only: false,
+            nosymfollow,
+            adopt: false,
+            force: false,
+            log_level: None,
+        }
+    }
+
+    #[test]
+    fn daemon_child_cli_args_omit_nosymfollow_by_default() {
+        let cli_args = daemon_child_cli_args(&start_args(false));
+
+        assert!(!cli_args.iter().any(|arg| arg == "--nosymfollow"));
+    }
+
+    #[test]
+    fn daemon_child_cli_args_include_nosymfollow_when_enabled() {
+        let cli_args = daemon_child_cli_args(&start_args(true));
+
+        assert!(cli_args.iter().any(|arg| arg == "--nosymfollow"));
+    }
 }

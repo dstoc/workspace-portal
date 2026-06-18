@@ -82,6 +82,12 @@ swapped in by a racing writer, a `..`, or a `/proc` magic link — would leave t
 entry root. Symlinks that stay *within* the entry still resolve, so legitimate
 in-entry links keep working.
 
+The optional `workspace-portal start --nosymfollow` flag is separate from this
+daemon-side confinement. It changes the mount-wide traversal policy: symlink
+inodes remain visible and `readlink` still works, but path traversal through
+symlink components is disabled by the mount. It is not a per-entry policy and
+it is not persisted in entry or workspace state.
+
 Properties:
 
 - **TOCTOU-safe.** The entry root is opened `O_PATH | O_DIRECTORY | O_NOFOLLOW`
