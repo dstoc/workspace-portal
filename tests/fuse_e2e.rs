@@ -112,7 +112,15 @@ fn looks_like_mount_permission_error(text: &str) -> bool {
 
 fn looks_like_nosymfollow_unsupported_error(text: &str) -> bool {
     let text = text.to_ascii_lowercase();
-    text.contains("nosymfollow") && (text.contains("invalid argument") || text.contains("einval"))
+    let rejected_by_direct_mount = text.contains("nosymfollow")
+        && (text.contains("invalid argument") || text.contains("einval"));
+    let rejected_by_fusermount = text.contains("fusermount3")
+        && text.contains("mount failed")
+        && text.contains("permission denied");
+    let rejected_by_fusermount_option_parser = text.contains("fusermount3")
+        && text.contains("unknown option")
+        && text.contains("nosymfollow");
+    rejected_by_direct_mount || rejected_by_fusermount || rejected_by_fusermount_option_parser
 }
 
 struct Fixture {
