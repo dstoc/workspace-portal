@@ -899,7 +899,7 @@ fn fuse_e2e_hard_link_and_copy_cover_rustc_style_file_duplication() -> Result<()
 
     fs::write(&mounted_source, "alpha-beta-gamma")?;
 
-    fs::hard_link(&fixture.docs_target.join("source.bin"), &host_link)?;
+    fs::hard_link(fixture.docs_target.join("source.bin"), &host_link)?;
     assert_eq!(fs::read_to_string(&host_link_mounted)?, "alpha-beta-gamma");
 
     let hard_link_err = fs::hard_link(&mounted_source, &mounted_link).unwrap_err();
