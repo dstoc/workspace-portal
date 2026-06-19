@@ -24,6 +24,9 @@ pub(crate) struct EditableConfig {
     #[serde(default = "editable_config_version")]
     pub version: u32,
 
+    #[serde(default = "default_readlink")]
+    pub readlink: bool,
+
     #[serde(default)]
     pub immutable_segments: BTreeSet<String>,
 
@@ -62,6 +65,10 @@ fn editable_config_version() -> u32 {
     EDIT_CONFIG_VERSION
 }
 
+fn default_readlink() -> bool {
+    true
+}
+
 impl EditableConfig {
     pub(crate) fn from_snapshot(snapshot: &WorkspaceSnapshot) -> Self {
         let entries = snapshot
@@ -81,6 +88,7 @@ impl EditableConfig {
 
         Self {
             version: EDIT_CONFIG_VERSION,
+            readlink: snapshot.readlink,
             immutable_segments: snapshot.immutable_segments.iter().cloned().collect(),
             entries,
         }
@@ -119,6 +127,7 @@ impl EditableConfig {
     pub(crate) fn render(&self) -> String {
         let mut out = String::new();
         writeln!(out, "version = {}", self.version).expect("write to string");
+        writeln!(out, "readlink = {}", self.readlink).expect("write to string");
         writeln!(
             out,
             "immutable_segments = {}",
@@ -166,6 +175,7 @@ impl Default for EditableConfig {
     fn default() -> Self {
         Self {
             version: EDIT_CONFIG_VERSION,
+            readlink: true,
             immutable_segments: BTreeSet::new(),
             entries: BTreeMap::new(),
         }
@@ -206,6 +216,12 @@ pub(crate) fn plan_edit(before: &EditableConfig, after: &EditableConfig) -> Vec<
                 replace: true,
             }),
         }
+    }
+
+    if before.readlink != after.readlink {
+        requests.push(ControlRequest::SetReadlink {
+            enabled: after.readlink,
+        });
     }
 
     for segment in before
@@ -305,6 +321,7 @@ mod tests {
             mounted: false,
             daemon: crate::state::DaemonStatus::Running,
             socket: PathBuf::from("/run/socket.sock"),
+            readlink: true,
             entries,
             immutable_segments: immutable_segments.into_iter().map(str::to_owned).collect(),
             generation: 0,
@@ -318,7 +335,7 @@ mod tests {
     #[test]
     fn render_empty_snapshot_includes_example() {
         let rendered = EditableConfig::from_snapshot(&snapshot(vec![], vec![])).render();
-        assert!(rendered.starts_with("version = 1\nimmutable_segments = []\n\n"));
+        assert!(rendered.starts_with("version = 1\nreadlink = true\nimmutable_segments = []\n\n"));
         assert!(rendered.contains("# [entries.docs]\n"));
         assert!(rendered.contains("# target = \"/path/to/docs\"\n"));
         assert!(rendered.contains("# mode = \"rw\"\n"));
@@ -336,6 +353,7 @@ mod tests {
         .render();
 
         assert!(rendered.contains("version = 1\n"));
+        assert!(rendered.contains("readlink = true\n"));
         assert!(rendered.contains("immutable_segments = [\"node_modules\", \"vendor\"]\n"));
         assert!(rendered.contains("[entries.\"cache\"]") || rendered.contains("[entries.cache]"));
         assert!(rendered.contains("target = \"/tmp/cache\"\n"));
@@ -349,6 +367,7 @@ mod tests {
         let config = EditableConfig::parse(
             r#"
 version = 1
+readlink = false
 immutable_segments = ["vendor"]
 
 [entries.docs]
@@ -372,13 +391,30 @@ target = "/tmp/cache"
         );
         assert_eq!(config.entries["docs"].mode, AccessMode::ReadWrite);
         assert_eq!(config.entries["cache"].mode, AccessMode::ReadWrite);
+        assert!(!config.readlink);
     }
 
     #[test]
     fn parse_defaults_missing_entries_and_immutable_segments() {
         let config = EditableConfig::parse("version = 1\n").unwrap();
+        assert!(config.readlink);
         assert!(config.entries.is_empty());
         assert!(config.immutable_segments.is_empty());
+    }
+
+    #[test]
+    fn parse_missing_readlink_defaults_to_true() {
+        let config = EditableConfig::parse(
+            r#"
+version = 1
+
+[entries.docs]
+target = "/workspace/docs"
+"#,
+        )
+        .unwrap();
+
+        assert!(config.readlink);
     }
 
     #[test]
@@ -445,6 +481,7 @@ immutable_segment = ["vendor"]
     fn planning_emits_only_changed_requests() {
         let before = EditableConfig {
             version: 1,
+            readlink: true,
             immutable_segments: ["vendor".to_owned(), "cache".to_owned()]
                 .into_iter()
                 .collect(),
@@ -463,6 +500,7 @@ immutable_segment = ["vendor"]
         };
         let after = EditableConfig {
             version: 1,
+            readlink: false,
             immutable_segments: ["cache".to_owned(), "node_modules".to_owned()]
                 .into_iter()
                 .collect(),
@@ -499,6 +537,7 @@ immutable_segment = ["vendor"]
                     mode: AccessMode::ReadOnly,
                     replace: true,
                 },
+                ControlRequest::SetReadlink { enabled: false },
                 ControlRequest::Thaw {
                     segment: "vendor".to_owned(),
                 },
@@ -507,6 +546,24 @@ immutable_segment = ["vendor"]
                 },
             ]
         );
+    }
+
+    #[test]
+    fn planning_omits_readlink_when_unchanged() {
+        let before = EditableConfig {
+            version: 1,
+            readlink: true,
+            immutable_segments: BTreeSet::new(),
+            entries: BTreeMap::new(),
+        };
+        let after = EditableConfig {
+            version: 1,
+            readlink: true,
+            immutable_segments: BTreeSet::new(),
+            entries: BTreeMap::new(),
+        };
+
+        assert!(plan_edit(&before, &after).is_empty());
     }
 
     #[test]

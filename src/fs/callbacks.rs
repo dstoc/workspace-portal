@@ -1435,6 +1435,10 @@ impl Filesystem for PortalFs {
             reply.error(Errno::EINVAL);
             return;
         }
+        if !state.readlink {
+            reply.error(Errno::ELOOP);
+            return;
+        }
 
         let mut runtime = self.runtime.lock().unwrap();
         let Some(path) = runtime.path_for_inode(&state, ino) else {

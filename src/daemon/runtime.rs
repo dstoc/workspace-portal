@@ -171,6 +171,16 @@ impl Daemon {
                     message: format!("froze {segment}"),
                 })
             }
+            ControlRequest::SetReadlink { enabled } => {
+                {
+                    let mut state = self.state.write().unwrap();
+                    state.set_readlink(enabled);
+                }
+                self.persist_state()?;
+                Ok(ControlResponse::Ack {
+                    message: format!("readlink set to {enabled}"),
+                })
+            }
             ControlRequest::Remove { name } => {
                 paths::validate_entry_name(&name)?;
                 let removed = {
@@ -350,6 +360,36 @@ fn trace_control_request_result(request: &ControlRequest, response: &ControlResp
                 debug!(
                     operation = "freeze",
                     immutable_segment = %segment,
+                    result = "error",
+                    error_code = protocol_error_code_label(code),
+                    error = %error,
+                    "control request result"
+                );
+            }
+        },
+        ControlRequest::SetReadlink { enabled } => match response {
+            ControlResponse::Ack { .. } => {
+                debug!(
+                    operation = "set_readlink",
+                    readlink_enabled = *enabled,
+                    result = "ok",
+                    response = "ack",
+                    "control request result"
+                );
+            }
+            ControlResponse::Status { .. } => {
+                debug!(
+                    operation = "set_readlink",
+                    readlink_enabled = *enabled,
+                    result = "ok",
+                    response = "status",
+                    "control request result"
+                );
+            }
+            ControlResponse::Error { code, error } => {
+                debug!(
+                    operation = "set_readlink",
+                    readlink_enabled = *enabled,
                     result = "error",
                     error_code = protocol_error_code_label(code),
                     error = %error,
@@ -589,6 +629,41 @@ mod tests {
 
         let persisted = PortalState::load_from_path(&state_path).unwrap();
         assert!(!persisted.immutable_segments.contains("vendor"));
+
+        let before_generation = persisted.generation;
+        let response = daemon
+            .handle_request(ControlRequest::SetReadlink { enabled: false })
+            .unwrap();
+        assert_eq!(
+            response,
+            ControlResponse::Ack {
+                message: "readlink set to false".to_owned()
+            }
+        );
+
+        let persisted = PortalState::load_from_path(&state_path).unwrap();
+        assert!(!persisted.readlink);
+        assert_eq!(persisted.generation, before_generation + 1);
+
+        match daemon.handle_request(ControlRequest::Status).unwrap() {
+            ControlResponse::Status { workspace } => {
+                assert!(!workspace.readlink);
+                assert_eq!(workspace.generation, persisted.generation);
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        let response = daemon
+            .handle_request(ControlRequest::SetReadlink { enabled: false })
+            .unwrap();
+        assert_eq!(
+            response,
+            ControlResponse::Ack {
+                message: "readlink set to false".to_owned()
+            }
+        );
+        let persisted_again = PortalState::load_from_path(&state_path).unwrap();
+        assert_eq!(persisted_again.generation, persisted.generation);
 
         let _ = fs::remove_dir_all(&workspace);
         let _ = fs::remove_file(&state_path);

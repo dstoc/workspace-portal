@@ -16,6 +16,9 @@ pub enum ControlRequest {
     Freeze {
         segment: String,
     },
+    SetReadlink {
+        enabled: bool,
+    },
     Remove {
         name: String,
     },
@@ -86,6 +89,7 @@ pub struct StatusPayload {
     pub mounted: bool,
     pub daemon: DaemonStatus,
     pub socket: PathBuf,
+    pub readlink: bool,
     pub entries: Vec<EntryState>,
     #[serde(default)]
     pub immutable_segments: Vec<String>,
@@ -98,6 +102,7 @@ impl From<WorkspaceSnapshot> for StatusPayload {
             mounted: value.mounted,
             daemon: value.daemon,
             socket: value.socket,
+            readlink: value.readlink,
             entries: value.entries.into_iter().map(Into::into).collect(),
             immutable_segments: value.immutable_segments,
         }
@@ -150,6 +155,7 @@ mod tests {
                 mounted: false,
                 daemon: DaemonStatus::Running,
                 socket: PathBuf::from("/run/socket.sock"),
+                readlink: true,
                 entries: vec![EntryRecord::new(
                     "docs",
                     PathBuf::from("/tmp/docs"),
@@ -166,12 +172,22 @@ mod tests {
     }
 
     #[test]
+    fn set_readlink_request_roundtrips_through_json() {
+        let request = ControlRequest::SetReadlink { enabled: false };
+
+        let encoded = encode_request(&request).unwrap();
+        assert_eq!(encoded, r#"{"op":"set_readlink","enabled":false}"#);
+        assert_eq!(decode_request(&encoded).unwrap(), request);
+    }
+
+    #[test]
     fn status_payload_preserves_snapshot_fields() {
         let snapshot = WorkspaceSnapshot {
             workspace: PathBuf::from("/workspace"),
             mounted: true,
             daemon: DaemonStatus::Stopped,
             socket: PathBuf::from("/run/socket.sock"),
+            readlink: false,
             entries: vec![EntryRecord::new(
                 "docs",
                 PathBuf::from("/tmp/docs"),
@@ -185,6 +201,7 @@ mod tests {
         assert_eq!(payload.entries.len(), 1);
         assert_eq!(payload.entries[0].name, "docs");
         assert_eq!(payload.daemon, DaemonStatus::Stopped);
+        assert!(!payload.readlink);
         assert_eq!(
             payload.immutable_segments,
             vec!["cache".to_owned(), "vendor".to_owned()]

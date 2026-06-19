@@ -1623,6 +1623,78 @@ fn fuse_e2e_edit_toml_buffer_updates_mode_and_immutable_segments() -> Result<(),
     Ok(())
 }
 
+#[test]
+#[ignore]
+#[cfg(unix)]
+fn fuse_e2e_edit_readlink_false_blocks_symlink_traversal_and_readlink() -> Result<(), Box<dyn Error>>
+{
+    require_fuse_prerequisites();
+
+    let fixture = Fixture::new();
+    start_rw_workspace(&fixture);
+
+    fs::create_dir_all(fixture.docs_target.join("nested"))?;
+    fs::write(
+        fixture.docs_target.join("nested/payload.txt"),
+        "symlink-policy",
+    )?;
+    symlink(
+        "nested/payload.txt",
+        fixture.docs_target.join("shortcut.txt"),
+    )?;
+
+    let script_path = std::env::temp_dir().join(format!(
+        "workspace-portal-edit-readlink-{}.sh",
+        std::process::id()
+    ));
+    fs::write(
+        &script_path,
+        b"#!/bin/sh\nsed -i 's/^readlink = true$/readlink = false/' \"$1\"\n",
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script_path, Permissions::from_mode(0o755))?;
+    }
+
+    let edited = run_edit_with_editor(&fixture, &script_path);
+    assert!(edited.status.success(), "{}", output_text(&edited));
+
+    let st = status_json(&fixture);
+    assert_eq!(
+        st["readlink"].as_bool(),
+        Some(false),
+        "status after edit: {st}"
+    );
+
+    let shortcut = fixture.workspace.join("docs/shortcut.txt");
+    assert!(
+        fs::symlink_metadata(&shortcut)?.file_type().is_symlink(),
+        "symlink inode should remain visible after disabling readlink"
+    );
+
+    let read_link_err = fs::read_link(&shortcut).expect_err("read_link should be rejected");
+    assert_eq!(read_link_err.raw_os_error(), Some(libc::ELOOP));
+
+    fs::metadata(&shortcut).expect_err("metadata through symlink should fail");
+
+    let open_err = OpenOptions::new()
+        .read(true)
+        .open(&shortcut)
+        .expect_err("opening through symlink should fail");
+    let _ = open_err;
+
+    let _ = fs::remove_file(&script_path);
+    let stop = run(
+        &["stop", "--workspace", &fixture.workspace_arg()],
+        &fixture.envs(),
+    );
+    assert!(stop.status.success(), "{}", output_text(&stop));
+    wait_for_mounted_state(&fixture, false);
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Backing-store TOCTOU confinement (see docs/proposals/symlink-confinement.md).
 //

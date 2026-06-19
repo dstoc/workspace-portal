@@ -64,6 +64,11 @@ This mechanism only holds if the consumer is in a **separate mount namespace**
 that does not itself include the host paths in question — i.e. a real container.
 For a same-namespace consumer see "Non-goals" below.
 
+The editable workspace `readlink` policy changes whether this resolution step
+is available through the portal. Symlink inode visibility does not change, but
+`readlink = false` makes the FUSE `readlink` callback fail with `ELOOP`, which
+blocks both target-text disclosure and traversal through that symlink.
+
 ### 2. The daemon resolves host paths confined beneath the entry target
 
 Where the daemon *itself* resolves a host path (for `open`, `stat`, `readdir`,
@@ -84,9 +89,10 @@ in-entry links keep working.
 
 The optional `workspace-portal start --nosymfollow` flag is separate from this
 daemon-side confinement. It changes the mount-wide traversal policy: symlink
-inodes remain visible and `readlink` still works, but path traversal through
-symlink components is disabled by the mount. It is not a per-entry policy and
-it is not persisted in entry or workspace state.
+inodes remain visible and `readlink` still works when the workspace `readlink`
+policy is true, but path traversal through symlink components is disabled by
+the mount where supported. It is not a per-entry policy and it is not
+persisted in entry or workspace state.
 
 Properties:
 

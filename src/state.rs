@@ -83,6 +83,8 @@ pub struct WorkspaceSnapshot {
     pub mounted: bool,
     pub daemon: DaemonStatus,
     pub socket: PathBuf,
+    #[serde(default = "default_readlink")]
+    pub readlink: bool,
     pub entries: Vec<EntryRecord>,
     #[serde(default)]
     pub immutable_segments: Vec<String>,
@@ -91,6 +93,10 @@ pub struct WorkspaceSnapshot {
 
 fn default_state_version() -> u32 {
     1
+}
+
+fn default_readlink() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -105,6 +111,8 @@ pub struct PortalState {
     pub mounted: bool,
     pub daemon: DaemonStatus,
     pub read_only_default: bool,
+    #[serde(default = "default_readlink")]
+    pub readlink: bool,
     pub generation: u64,
     #[serde(default)]
     pub entries: BTreeMap<String, EntryRecord>,
@@ -123,6 +131,7 @@ impl PortalState {
             mounted: false,
             daemon: DaemonStatus::Unknown,
             read_only_default: false,
+            readlink: true,
             generation: 0,
             entries: BTreeMap::new(),
             immutable_segments: BTreeSet::new(),
@@ -186,12 +195,23 @@ impl PortalState {
         removed
     }
 
+    pub fn set_readlink(&mut self, enabled: bool) -> bool {
+        if self.readlink == enabled {
+            return false;
+        }
+
+        self.readlink = enabled;
+        self.generation = self.generation.saturating_add(1);
+        true
+    }
+
     pub fn snapshot(&self) -> WorkspaceSnapshot {
         WorkspaceSnapshot {
             workspace: self.workspace.clone(),
             mounted: self.mounted,
             daemon: self.daemon,
             socket: self.socket.clone(),
+            readlink: self.readlink,
             entries: self.entries.values().cloned().collect(),
             immutable_segments: self.immutable_segments.iter().cloned().collect(),
             generation: self.generation,
@@ -391,5 +411,32 @@ mod tests {
         assert!(state.thaw_segment("vendor"));
         assert!(!state.thaw_segment("vendor"));
         assert_eq!(state.generation, 3);
+    }
+
+    #[test]
+    fn missing_readlink_defaults_to_true_when_loading_state() {
+        let state_dir = unique_path("state-load");
+        let state_file = state_dir.join("portal.json");
+        fs::create_dir_all(&state_dir).unwrap();
+        let mut json = serde_json::to_value(
+            PortalState::new(
+                PathBuf::from("/workspace"),
+                "abc123".to_owned(),
+                PathBuf::from("/run/socket.sock"),
+            )
+            .with_storage_paths(state_file.clone()),
+        )
+        .unwrap();
+        if let serde_json::Value::Object(ref mut map) = json {
+            map.remove("readlink");
+        }
+        fs::write(&state_file, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+
+        let loaded = PortalState::load_from_path(&state_file).unwrap();
+        assert!(loaded.readlink);
+        assert!(loaded.snapshot().readlink);
+
+        let _ = fs::remove_file(&state_file);
+        let _ = fs::remove_dir_all(&state_dir);
     }
 }

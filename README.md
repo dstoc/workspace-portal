@@ -85,6 +85,7 @@ Workspace: /home/user/workspace/workspace-portal/workspace
 Mount:     mounted
 Daemon:    running
 Socket:    /run/user/1000/workspace-portal/7f3a.sock
+READLINK: true
 IMMUTABLE SEGMENTS: vendor
 
 ENTRY     TARGET                    MODE
@@ -130,8 +131,7 @@ Options:
 - `--allow-other` enables FUSE `allow_other`
 - `--no-allow-other` disables it explicitly
 - `--read-only` makes the workspace read-only by default
-- `--nosymfollow` keeps symlinks visible and readable with `readlink`, but
-  disables traversal through symlink components in the mount
+- `--nosymfollow` disables symlink traversal in the mount where supported
 - `--adopt` uses an existing workspace directory
 - `--force` overrides stale state or mount conditions
 
@@ -194,10 +194,11 @@ workspace-portal edit [--workspace <path>]
 ```
 
 Opens the current desired state in `$VISUAL`/`$EDITOR`/`vi` as a TOML buffer
-with `version = 1`, an `immutable_segments = [...]` array, and
+with `version = 1`, `readlink = true`, an `immutable_segments = [...]` array, and
 `[entries.<name>]` tables containing `target` and `mode`.
 Editing this buffer can add, remove, rename, retarget, or flip entries between
-`ro` and `rw`, and it can also manage immutable segments. An unchanged or
+`ro` and `rw`, and it can also manage the `readlink` policy and immutable
+segments. An unchanged or
 invalid buffer applies nothing; parse or validation errors reopen the editor
 with a commented error at the top.
 
@@ -205,6 +206,12 @@ As before, flipping or removing an entry leaves file handles that are already
 open undisturbed; only later opens see the change. Likewise, freezing does not
 retroactively revoke already-open writable file handles; only later
 path-based mutations and writable opens see the new rule.
+
+Symlink inodes remain visible through the portal. Setting `readlink = false`
+blocks the FUSE `readlink` operation with `ELOOP`, which also prevents traversal
+through symlinks. `--nosymfollow` is separate: it blocks traversal at the mount
+layer where supported while still allowing `readlink` when the workspace policy
+is true.
 
 ### `status`
 
@@ -214,8 +221,8 @@ Show workspace status:
 workspace-portal status [--workspace <path>] [--json]
 ```
 
-Human output includes an `IMMUTABLE SEGMENTS` line. JSON output includes a
-top-level `immutable_segments` array.
+Human output includes `READLINK` and `IMMUTABLE SEGMENTS` lines. JSON output
+includes top-level `readlink` and `immutable_segments` fields.
 
 ### `stop`
 

@@ -28,6 +28,7 @@ pub(crate) fn print_status(snapshot: WorkspaceSnapshot) {
     } else {
         snapshot.immutable_segments.join(", ")
     };
+    println!("READLINK: {}", snapshot.readlink);
     println!("IMMUTABLE SEGMENTS: {immutable_segments}");
     println!();
     let entries: Vec<_> = snapshot.entries.into_iter().map(Into::into).collect();

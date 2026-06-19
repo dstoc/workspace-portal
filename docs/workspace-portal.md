@@ -36,6 +36,7 @@ The current codebase implements:
   - `start`
   - `add`
   - `rm`
+  - `edit`
   - `status`
   - `stop`
   - `list`
@@ -188,6 +189,27 @@ Notes:
 - this is soft-revocation behavior, and the only behavior: removing an entry
   never forcibly tears down handles that are already open
 
+### `edit`
+
+```bash
+workspace-portal edit [--workspace <path>]
+```
+
+Current behavior:
+
+- opens the desired state as a TOML buffer with `version = 1`, `readlink = true`,
+  `immutable_segments = [...]`, and `[entries.<name>]` tables
+- editing that buffer can add, remove, rename, retarget, or flip entries between
+  `ro` and `rw`
+- the same buffer can also manage the workspace `readlink` policy and immutable
+  segments
+
+Notes:
+
+- parse or validation errors reopen the editor with a commented error at the top
+- unchanged buffers apply nothing
+- flipping or removing an entry does not revoke already-open file handles
+
 ### `status`
 
 ```bash
@@ -210,6 +232,8 @@ JSON payload shape:
   "mounted": true,
   "daemon": "running",
   "socket": "/run/user/1000/workspace-portal/7f3a.sock",
+  "readlink": true,
+  "immutable_segments": [],
   "entries": [
     {"name": "project-a", "mode": "rw", "target": "/home/user/code/project-a"},
     {"name": "notes", "mode": "ro", "target": "/home/user/notes/current"}
@@ -409,13 +433,19 @@ Current behavior:
 
 - by default, symlinks within a target are visible through the portal,
   `readlink` is implemented, and symlink traversal works
+- with `readlink = false`, symlink inodes remain visible but `readlink`
+  returns `ELOOP` and path traversal through the symlink is blocked at the FUSE
+  `readlink` step
 - with `--nosymfollow`, symlinks remain visible and `readlink` still returns
-  the stored link text, but path traversal through symlink components is
-  disabled by the mount
+  the stored link text when `readlink = true`, but path traversal through
+  symlink components is disabled by the mount where supported
 - broken symlinks remain visible as symlinks and reads fail with `ENOENT`
 
-Daemon-side `safe_open` confinement is a separate host-path protection; `--nosymfollow`
-controls consumer-side traversal through symlinks in the mounted workspace.
+Daemon-side `safe_open` confinement is a separate host-path protection; the
+workspace `readlink` policy controls whether link text is disclosed and whether
+symlink traversal is allowed at the FUSE `readlink` callback, while
+`--nosymfollow` controls consumer-side traversal through symlinks in the
+mounted workspace.
 
 ### Read-only entries
 
