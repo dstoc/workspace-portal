@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.5](https://github.com/dstoc/workspace-portal/compare/workspace-portal-v0.1.4...workspace-portal-v0.1.5) (2026-06-19)
+
+
+### Features
+
+* `edit` now uses toml format ([2b450ad](https://github.com/dstoc/workspace-portal/commit/2b450ad918f3048f2ed3a93b59c8471b896095b9))
+* add readlink policy ([e78d836](https://github.com/dstoc/workspace-portal/commit/e78d836051866f4680929f6a228a6e134791350d))
+
 ## [0.1.4](https://github.com/dstoc/workspace-portal/compare/workspace-portal-v0.1.3...workspace-portal-v0.1.4) (2026-06-18)
 
 
