@@ -193,16 +193,18 @@ Edit the whole entry set at once in your editor:
 workspace-portal edit [--workspace <path>]
 ```
 
-Opens the current entries in `$VISUAL`/`$EDITOR`/`vi` as an `ENTRY TARGET MODE`
-table. On save, the difference is applied to the running mount — add, remove,
-rename, retarget, or flip entries between `ro` and `rw`. Flipping or removing an
-entry leaves file handles that are already open undisturbed; only later opens
-see the change. An unchanged or invalid buffer applies nothing.
+Opens the current desired state in `$VISUAL`/`$EDITOR`/`vi` as a TOML buffer
+with `version = 1`, an `immutable_segments = [...]` array, and
+`[entries.<name>]` tables containing `target` and `mode`.
+Editing this buffer can add, remove, rename, retarget, or flip entries between
+`ro` and `rw`, and it can also manage immutable segments. An unchanged or
+invalid buffer applies nothing; parse or validation errors reopen the editor
+with a commented error at the top.
 
-Immutable segment rules are separate from `edit`. Use `freeze` and `thaw` to
-manage them. Like `rw` to `ro` flips, freezing does not retroactively revoke
-already-open writable file handles; only later path-based mutations and writable
-opens see the new rule.
+As before, flipping or removing an entry leaves file handles that are already
+open undisturbed; only later opens see the change. Likewise, freezing does not
+retroactively revoke already-open writable file handles; only later
+path-based mutations and writable opens see the new rule.
 
 ### `status`
 

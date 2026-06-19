@@ -1504,13 +1504,15 @@ fn fuse_e2e_edit_rw_to_ro_preserves_held_write_handle() -> Result<(), Box<dyn Er
         .open(fixture.workspace.join("docs/held.txt"))?;
     held.write_all(b"v1-held")?;
 
-    // Build a sed editor script that flips "rw" → "ro" in the last column.
-    // Data rows end with " rw"; header/comment lines begin with "#" and are ignored.
+    // Build a sed editor script that flips the TOML mode line from rw → ro.
     let script_path = std::env::temp_dir().join(format!(
         "workspace-portal-edit-flip-{}.sh",
         std::process::id()
     ));
-    fs::write(&script_path, b"#!/bin/sh\nsed -i 's/ rw$/ ro/' \"$1\"\n")?;
+    fs::write(
+        &script_path,
+        b"#!/bin/sh\nsed -i 's/mode = \"rw\"/mode = \"ro\"/' \"$1\"\n",
+    )?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1553,6 +1555,63 @@ fn fuse_e2e_edit_rw_to_ro_preserves_held_write_handle() -> Result<(), Box<dyn Er
     );
 
     // Clean up.
+    let _ = fs::remove_file(&script_path);
+    let stop = run(
+        &["stop", "--workspace", &fixture.workspace_arg()],
+        &fixture.envs(),
+    );
+    assert!(stop.status.success(), "{}", output_text(&stop));
+    wait_for_mounted_state(&fixture, false);
+
+    Ok(())
+}
+
+#[test]
+#[ignore]
+fn fuse_e2e_edit_toml_buffer_updates_mode_and_immutable_segments() -> Result<(), Box<dyn Error>> {
+    require_fuse_prerequisites();
+
+    let fixture = Fixture::new();
+    start_rw_workspace(&fixture);
+
+    let script_path = std::env::temp_dir().join(format!(
+        "workspace-portal-edit-toml-{}.sh",
+        std::process::id()
+    ));
+    fs::write(
+        &script_path,
+        b"#!/bin/sh\nsed -i -e 's/mode = \"rw\"/mode = \"ro\"/' -e 's/^immutable_segments = \\[\\]$/immutable_segments = [\"vendor\"]/' \"$1\"\n",
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script_path, Permissions::from_mode(0o755))?;
+    }
+
+    let edited = run_edit_with_editor(&fixture, &script_path);
+    assert!(edited.status.success(), "{}", output_text(&edited));
+
+    let st = status_json(&fixture);
+    let entries = st["entries"].as_array().expect("entries must be an array");
+    let docs_entry = entries
+        .iter()
+        .find(|e| e["name"].as_str() == Some("docs"))
+        .expect("docs entry must still be present");
+    assert_eq!(
+        docs_entry["mode"].as_str(),
+        Some("ro"),
+        "docs entry mode must be 'ro' after TOML edit, status: {st}"
+    );
+    let immutable_segments = st["immutable_segments"]
+        .as_array()
+        .expect("immutable_segments must be an array");
+    assert!(
+        immutable_segments
+            .iter()
+            .any(|segment| segment.as_str() == Some("vendor")),
+        "immutable_segments must contain vendor after TOML edit, status: {st}"
+    );
+
     let _ = fs::remove_file(&script_path);
     let stop = run(
         &["stop", "--workspace", &fixture.workspace_arg()],

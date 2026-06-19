@@ -1,4 +1,5 @@
 pub(crate) mod background;
+pub(crate) mod edit_config;
 pub(crate) mod entry_format;
 pub(crate) mod mount;
 pub(crate) mod output;
@@ -17,12 +18,13 @@ use std::{
 use crate::{
     error::{Error, Result},
     paths,
-    protocol::{self, ControlRequest, ControlResponse, EntryState, StatusPayload},
+    protocol::{self, ControlRequest, ControlResponse, StatusPayload},
     state::{AccessMode, DaemonStatus},
 };
 
 use self::{
     background::{socket_is_live, spawn_background_daemon, wait_for_socket_ready},
+    edit_config::{EditableConfig, plan_edit, wrap_error_comment_block},
     mount::{unmount_workspace_from_cli, workspace_is_mounted},
     output::{print_prerequisite_report, print_status},
     runtime::{Daemon, DaemonConfig},
@@ -472,35 +474,26 @@ pub async fn check(args: CheckArgs) -> Result<()> {
 pub async fn edit(args: EditArgs) -> Result<()> {
     let (ctx, live_state) = load_workspace_context(args.workspace)?;
 
-    // Step 2: Determine the authoritative "before" entry set.
-    let before: Vec<EntryState> = if socket_is_live(&ctx.socket)? {
+    let before_snapshot = if socket_is_live(&ctx.socket)? {
         match send_request(&ctx.socket, &ControlRequest::Status)? {
-            ControlResponse::Status { workspace } => {
-                workspace.entries.into_iter().map(Into::into).collect()
-            }
+            ControlResponse::Status { workspace } => workspace,
             other => return Err(response_unexpected(other)),
         }
     } else {
-        live_state
-            .snapshot()
-            .entries
-            .into_iter()
-            .map(Into::into)
-            .collect()
+        live_state.snapshot()
     };
 
-    // Step 3: Render the initial buffer.
-    let original_buffer = entry_format::render_entries(&before, true);
+    let before = EditableConfig::from_snapshot(&before_snapshot);
+    let original_buffer = before.render();
     let original_bytes = original_buffer.as_bytes().to_vec();
 
-    // Step 4: Write to a temp file.
     let temp_path = {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.subsec_nanos())
             .unwrap_or(0);
         std::env::temp_dir().join(format!(
-            "workspace-portal-edit-{}-{}.conf",
+            "workspace-portal-edit-{}-{}.toml",
             std::process::id(),
             nanos
         ))
@@ -511,15 +504,12 @@ pub async fn edit(args: EditArgs) -> Result<()> {
         path: temp_path.clone(),
     };
 
-    // Step 5: Resolve the editor.
     let editor = std::env::var_os("VISUAL")
         .or_else(|| std::env::var_os("EDITOR"))
         .unwrap_or_else(|| std::ffi::OsString::from("vi"));
 
-    // Step 6: Editor round-trip loop.
-    let mut prev_bytes: Option<Vec<u8>> = None;
-    let after: Vec<EntryState> = loop {
-        // Launch the editor.
+    let mut prev_failed_bytes: Option<Vec<u8>> = None;
+    let after = loop {
         let status = std::process::Command::new(&editor)
             .arg(&temp_path)
             .status()
@@ -530,52 +520,44 @@ pub async fn edit(args: EditArgs) -> Result<()> {
             return Ok(());
         }
 
-        // Read the file back.
         let current_bytes = fs::read(&temp_path)?;
 
-        // If byte-identical to the ORIGINAL buffer on first pass → no changes.
-        if prev_bytes.is_none() && current_bytes == original_bytes {
+        if prev_failed_bytes.is_none() && current_bytes == original_bytes {
             println!("no changes");
             return Ok(());
         }
 
-        // Parse and validate.
         let text = String::from_utf8_lossy(&current_bytes);
-        match entry_format::parse_entries(&text).and_then(|parsed| {
-            entry_format::validate_entries(&parsed)?;
-            Ok(parsed)
-        }) {
+        match EditableConfig::parse(&text) {
             Ok(parsed) => break parsed,
             Err(err) => {
-                // If bytes are unchanged from the previous failed iteration → give up.
-                // (main prints the returned error, so don't echo it here.)
-                if let Some(ref prev) = prev_bytes
-                    && current_bytes == *prev
-                {
-                    return Err(err);
-                }
                 eprintln!("{err}");
-                eprintln!("(The buffer will be reopened for further editing.)");
-                prev_bytes = Some(current_bytes);
-                // Loop: re-launch the editor on the same temp file.
+                if prev_failed_bytes
+                    .as_ref()
+                    .map(|prev| prev.as_slice() == current_bytes.as_slice())
+                    .unwrap_or(false)
+                {
+                    return Err(err.into());
+                }
+
+                let wrapped_buffer = wrap_error_comment_block(&text, err.to_string());
+                fs::write(&temp_path, wrapped_buffer.as_bytes())?;
+                prev_failed_bytes = Some(wrapped_buffer.into_bytes());
             }
         }
     };
 
-    // Step 7: Compute the diff.
-    let plan = entry_format::plan_edit(&before, &after);
+    let plan = plan_edit(&before, &after);
     if plan.is_empty() {
         println!("no changes");
         return Ok(());
     }
 
-    // Step 8: Send each request in the plan.
     for req in &plan {
         let response = send_request(&ctx.socket, req)?;
         ensure_response_ok(response)?;
     }
 
-    // Step 9: Report success.
     println!("applied {} change(s)", plan.len());
     Ok(())
 }
