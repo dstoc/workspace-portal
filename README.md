@@ -195,15 +195,20 @@ workspace-portal forget <workspace>
 
 ### `audit`
 
-Audit hard links that cross immutable boundaries:
+Audit hard links that cross immutable boundaries, or symlink targets that
+escape an entry:
 
 ```bash
 workspace-portal audit hardlinks <workspace>
+workspace-portal audit symlinks <workspace>
 ```
 
-The command scans the workspace targets, prints any crossing hard-link groups,
-and exits non-zero when findings are present. If no crossings are found, it
-prints the no-findings message and exits `0`.
+`audit hardlinks` scans the workspace targets, prints any crossing hard-link
+groups, and exits non-zero when findings are present. `audit symlinks` scans
+the workspace targets for symlink target text that would resolve outside an
+entry if followed, prints matching entry-relative paths and stored targets, and
+exits non-zero when findings are present. If no findings are present, each
+command prints its no-findings message and exits `0`.
 
 ## State and Paths
 
