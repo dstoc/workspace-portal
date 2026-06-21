@@ -134,7 +134,8 @@ with `version = 1`, `readlink = true`, an `immutable_segments = [...]` array, an
 `[entries.<name>]` tables containing `target` and `mode`.
 Editing this buffer can add, remove, rename, retarget, or flip entries between
 `ro` and `rw`, and it can also manage the `readlink` policy and immutable
-segments. An unchanged or
+segments. Read-write entries also support same-entry hard links unless either
+endpoint is under an immutable segment. An unchanged or
 invalid buffer applies nothing; parse or validation errors reopen the editor
 with a commented error at the top.
 
@@ -191,6 +192,18 @@ Remove stored metadata for a stopped workspace:
 ```bash
 workspace-portal forget <workspace>
 ```
+
+### `audit`
+
+Audit hard links that cross immutable boundaries:
+
+```bash
+workspace-portal audit hardlinks <workspace>
+```
+
+The command scans the workspace targets, prints any crossing hard-link groups,
+and exits non-zero when findings are present. If no crossings are found, it
+prints the no-findings message and exits `0`.
 
 ## State and Paths
 

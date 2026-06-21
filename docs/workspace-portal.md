@@ -39,6 +39,7 @@ The current codebase implements:
   - `list`
   - `check`
   - `forget`
+  - `audit hardlinks`
 - a long-running control daemon over a Unix domain socket
 - persisted workspace state
 - workspace discovery by walking upward and checking registry state
@@ -153,6 +154,8 @@ Current behavior:
   `ro` and `rw`
 - the same buffer can also manage the workspace `readlink` policy and immutable
   segments
+- read-write entries support same-entry hard links unless either endpoint is
+  under an immutable segment
 
 Notes:
 
@@ -241,6 +244,22 @@ Current behavior:
 - removes stored state, registry, stale socket, and log metadata for the
   workspace
 - does not remove the workspace directory or any entry targets
+
+### `audit`
+
+```bash
+workspace-portal audit hardlinks <workspace>
+```
+
+Current behavior:
+
+- scans the workspace targets for visible hard-link groups that cross immutable
+  and mutable portal paths
+- prints a no-findings message and exits with status `0` when nothing crosses
+  an immutable boundary
+- prints the matching inode groups and exits non-zero when findings are present
+- uses the current workspace state, so it can audit a stopped workspace from
+  persisted registry data
 
 ## Workspace discovery
 
@@ -473,6 +492,15 @@ Current behavior:
 
 - same-entry renames are allowed
 - cross-entry renames are rejected
+
+### Hard links
+
+Current behavior:
+
+- same-entry hard links are allowed in read-write entries
+- hard links are rejected when either endpoint's entry-relative path contains
+  an immutable segment
+- cross-entry hard links remain rejected
 
 ### Caching
 

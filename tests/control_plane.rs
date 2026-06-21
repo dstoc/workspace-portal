@@ -10,6 +10,11 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 
+use workspace_portal::{
+    paths,
+    state::{AccessMode, DaemonStatus, EntryRecord, PortalState},
+};
+
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
 fn unique_dir(prefix: &str) -> PathBuf {
@@ -127,6 +132,46 @@ impl Fixture {
     }
 }
 
+fn workspace_state_path(fixture: &Fixture) -> PathBuf {
+    let workspace = fixture.workspace.canonicalize().unwrap();
+    let workspace_id = paths::workspace_id(&workspace);
+    fixture
+        .state_home
+        .join("workspace-portal")
+        .join("workspaces")
+        .join(format!("{workspace_id}.json"))
+}
+
+fn workspace_socket_path(fixture: &Fixture) -> PathBuf {
+    let workspace = fixture.workspace.canonicalize().unwrap();
+    let workspace_id = paths::workspace_id(&workspace);
+    fixture
+        .runtime_dir
+        .join("workspace-portal")
+        .join(format!("{workspace_id}.sock"))
+}
+
+fn write_workspace_state(fixture: &Fixture, entries: &[EntryRecord], immutable_segments: &[&str]) {
+    let workspace = fixture.workspace.canonicalize().unwrap();
+    let workspace_id = paths::workspace_id(&workspace);
+    let state_path = workspace_state_path(fixture);
+    let socket = workspace_socket_path(fixture);
+    let mut state =
+        PortalState::new(workspace, workspace_id, socket).with_storage_paths(state_path.clone());
+    state.daemon = DaemonStatus::Stopped;
+    state.mounted = false;
+
+    for segment in immutable_segments {
+        state.freeze_segment((*segment).to_owned());
+    }
+
+    for entry in entries {
+        state.add_entry(entry.clone(), false).unwrap();
+    }
+
+    state.write_atomic(&state_path).unwrap();
+}
+
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = run(&["stop", &self.workspace_arg(), "--force"], &self.envs());
@@ -188,6 +233,18 @@ fn start_help_lists_nosymfollow_flag() {
 }
 
 #[test]
+fn audit_hardlinks_help_exposes_the_subcommand() {
+    let envs: [(&str, &Path); 0] = [];
+    let help = run(&["audit", "hardlinks", "--help"], &envs);
+
+    assert!(help.status.success(), "{}", output_text(&help));
+    let text = output_text(&help);
+    assert!(text.contains("Usage: workspace-portal audit hardlinks <WORKSPACE>"));
+    assert!(text.contains("Workspace to audit"));
+    assert!(text.contains("hardlinks"));
+}
+
+#[test]
 fn start_leaves_workspace_empty_before_entries_are_added() -> Result<(), Box<dyn Error>> {
     if !cfg!(target_os = "linux") {
         eprintln!("skipping workspace-emptiness regression test on non-Linux");
@@ -237,6 +294,74 @@ fn start_leaves_workspace_empty_before_entries_are_added() -> Result<(), Box<dyn
     assert!(stop.status.success(), "{}", output_text(&stop));
 
     Ok(())
+}
+
+#[test]
+fn audit_hardlinks_reports_crossing_immutable_and_mutable_aliases() {
+    let fixture = Fixture::new();
+    let entry_root = fixture.target.join("docs");
+    let immutable_dir = entry_root.join(".git");
+    let mutable_dir = entry_root.join("target");
+
+    fs::create_dir_all(&immutable_dir).unwrap();
+    fs::create_dir_all(&mutable_dir).unwrap();
+
+    let immutable_file = immutable_dir.join("config");
+    let mutable_alias = mutable_dir.join("config-alias");
+    fs::write(&immutable_file, "hardlink-audit").unwrap();
+    fs::hard_link(&immutable_file, &mutable_alias).unwrap();
+
+    write_workspace_state(
+        &fixture,
+        &[EntryRecord::new(
+            "docs",
+            entry_root.clone(),
+            AccessMode::ReadWrite,
+        )],
+        &[".git"],
+    );
+
+    let audit = run(
+        &["audit", "hardlinks", &fixture.workspace_arg()],
+        &fixture.envs(),
+    );
+    assert!(!audit.status.success(), "{}", output_text(&audit));
+
+    let text = output_text(&audit);
+    assert!(text.contains("hardlink aliases crossing immutable boundaries"));
+    assert!(text.contains("docs:.git/config"));
+    assert!(text.contains("docs:target/config-alias"));
+}
+
+#[test]
+fn audit_hardlinks_ignores_mutable_to_mutable_links() {
+    let fixture = Fixture::new();
+    let entry_root = fixture.target.join("docs");
+    fs::create_dir_all(&entry_root).unwrap();
+
+    let source = entry_root.join("shared.txt");
+    let alias = entry_root.join("shared-copy.txt");
+    fs::write(&source, "hardlink-audit").unwrap();
+    fs::hard_link(&source, &alias).unwrap();
+
+    write_workspace_state(
+        &fixture,
+        &[EntryRecord::new(
+            "docs",
+            entry_root.clone(),
+            AccessMode::ReadWrite,
+        )],
+        &[],
+    );
+
+    let audit = run(
+        &["audit", "hardlinks", &fixture.workspace_arg()],
+        &fixture.envs(),
+    );
+    assert!(audit.status.success(), "{}", output_text(&audit));
+    assert!(
+        output_text(&audit).contains("no hardlink aliases crossing immutable boundaries found")
+    );
 }
 
 #[test]
