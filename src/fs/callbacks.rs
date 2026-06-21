@@ -1383,12 +1383,174 @@ impl Filesystem for PortalFs {
     fn link(
         &self,
         _req: &Request,
-        _ino: INodeNo,
-        _newparent: INodeNo,
-        _newname: &std::ffi::OsStr,
+        ino: INodeNo,
+        newparent: INodeNo,
+        newname: &std::ffi::OsStr,
         reply: ReplyEntry,
     ) {
-        reply.error(Errno::EOPNOTSUPP);
+        if newparent == ROOT_INO {
+            debug!(
+                "link ino={} newparent={} newname={:?} -> EPERM (root destination)",
+                ino.0, newparent.0, newname
+            );
+            reply.error(Errno::EPERM);
+            return;
+        }
+
+        let state = self.state.read().unwrap().clone();
+        let mut runtime = self.runtime.lock().unwrap();
+
+        let Some(source_path) = runtime.path_for_inode(&state, ino) else {
+            debug!(
+                "link ino={} newparent={} newname={:?} -> ENOENT (unknown source inode)",
+                ino.0, newparent.0, newname
+            );
+            reply.error(Errno::ENOENT);
+            return;
+        };
+        let source_resolved = match state_for_path(&state, &source_path) {
+            Ok(resolved) => resolved,
+            Err(err) => {
+                let errno = errno_from_error(&err);
+                debug!(
+                    "link ino={} newparent={} newname={:?} source_path={:?} -> {:?} err={}",
+                    ino.0, newparent.0, newname, source_path, errno, err
+                );
+                reply.error(errno);
+                return;
+            }
+        };
+        if let Err(err) = ensure_mutable_relative_path(&state, &source_resolved.relative) {
+            debug!(
+                "link ino={} newparent={} newname={:?} source={} -> EPERM err={}",
+                ino.0,
+                newparent.0,
+                newname,
+                source_resolved.target.display(),
+                err
+            );
+            reply.error(mutation_permission_errno(&err, Errno::EPERM));
+            return;
+        }
+
+        let name = newname.to_os_string();
+        let (destination_path, destination_resolved) =
+            match runtime.resolve_parent_child_writable(&state, newparent, &name) {
+                Ok(value) => value,
+                Err(err) => {
+                    let errno = mutation_permission_errno(&err, Errno::EACCES);
+                    debug!(
+                        "link ino={} newparent={} newname={:?} -> {:?} (destination) err={}",
+                        ino.0, newparent.0, newname, errno, err
+                    );
+                    reply.error(errno);
+                    return;
+                }
+            };
+
+        if source_resolved.entry.name != destination_resolved.entry.name {
+            debug!(
+                "link ino={} newparent={} newname={:?} source_entry={} dest_entry={} -> EXDEV",
+                ino.0,
+                newparent.0,
+                newname,
+                source_resolved.entry.name,
+                destination_resolved.entry.name
+            );
+            reply.error(Errno::EXDEV);
+            return;
+        }
+
+        let metadata =
+            match safe_open::lstat(&source_resolved.entry.target, &source_resolved.relative) {
+                Ok(metadata) => metadata,
+                Err(err) => {
+                    let errno = Errno::from_i32(raw_os_errno(&err));
+                    debug!(
+                        "link ino={} newparent={} newname={:?} source={} -> {:?} lstat error={}",
+                        ino.0,
+                        newparent.0,
+                        newname,
+                        source_resolved.target.display(),
+                        errno,
+                        err
+                    );
+                    reply.error(errno);
+                    return;
+                }
+            };
+        if metadata.file_type().is_dir() {
+            debug!(
+                "link ino={} newparent={} newname={:?} source={} -> EPERM (source is directory)",
+                ino.0,
+                newparent.0,
+                newname,
+                source_resolved.target.display()
+            );
+            reply.error(Errno::EPERM);
+            return;
+        }
+
+        match safe_open::hard_link(
+            &source_resolved.entry.target,
+            &source_resolved.relative,
+            &destination_resolved.relative,
+        ) {
+            Ok(()) => match safe_open::lstat(
+                &destination_resolved.entry.target,
+                &destination_resolved.relative,
+            ) {
+                Ok(metadata) => {
+                    let destination_ino = runtime.remember_lookup(destination_path.clone());
+                    let attr = attr_from_metadata(
+                        destination_ino,
+                        &metadata,
+                        entry_is_read_only(&destination_resolved.entry, state.read_only_default),
+                        0,
+                    );
+                    debug!(
+                        "link ino={} newparent={} newname={:?} source={} destination={} -> ino={} ok",
+                        ino.0,
+                        newparent.0,
+                        newname,
+                        source_resolved.target.display(),
+                        destination_resolved.target.display(),
+                        destination_ino.0
+                    );
+                    reply.entry(
+                        &TTL,
+                        &attr,
+                        Generation(destination_resolved.entry.generation),
+                    );
+                }
+                Err(err) => {
+                    let errno = Errno::from_i32(raw_os_errno(&err));
+                    debug!(
+                        "link ino={} newparent={} newname={:?} destination={} -> {:?} lstat error={}",
+                        ino.0,
+                        newparent.0,
+                        newname,
+                        destination_resolved.target.display(),
+                        errno,
+                        err
+                    );
+                    reply.error(errno);
+                }
+            },
+            Err(err) => {
+                let errno = Errno::from_i32(raw_os_errno(&err));
+                debug!(
+                    "link ino={} newparent={} newname={:?} source={} destination={} -> errno={:?}",
+                    ino.0,
+                    newparent.0,
+                    newname,
+                    source_resolved.target.display(),
+                    destination_resolved.target.display(),
+                    errno
+                );
+                reply.error(errno);
+            }
+        }
     }
 
     fn read(
