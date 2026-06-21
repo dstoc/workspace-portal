@@ -243,6 +243,20 @@ pub(crate) fn unlink(entry_root: &Path, relative: &Path) -> io::Result<()> {
     check(unsafe { libc::unlinkat(parent.as_raw_fd(), leaf.as_ptr(), 0) })
 }
 
+pub(crate) fn hard_link(entry_root: &Path, source: &Path, destination: &Path) -> io::Result<()> {
+    let (source_parent, source_leaf) = open_parent(entry_root, source)?;
+    let (destination_parent, destination_leaf) = open_parent(entry_root, destination)?;
+    check(unsafe {
+        libc::linkat(
+            source_parent.as_raw_fd(),
+            source_leaf.as_ptr(),
+            destination_parent.as_raw_fd(),
+            destination_leaf.as_ptr(),
+            0,
+        )
+    })
+}
+
 pub(crate) fn rmdir(entry_root: &Path, relative: &Path) -> io::Result<()> {
     let (parent, leaf) = open_parent(entry_root, relative)?;
     check(unsafe { libc::unlinkat(parent.as_raw_fd(), leaf.as_ptr(), libc::AT_REMOVEDIR) })

@@ -49,14 +49,11 @@ fn output_text(output: &Output) -> String {
     text
 }
 
-fn assert_unsupported_operation(err: &std::io::Error) {
+fn assert_permission_denied_operation(err: &std::io::Error) {
     assert!(
-        err.kind() == ErrorKind::Unsupported
-            || matches!(
-                err.raw_os_error(),
-                Some(code) if code == libc::EOPNOTSUPP || code == libc::ENOTSUP
-            ),
-        "expected unsupported operation, got {err:?}"
+        err.kind() == ErrorKind::PermissionDenied
+            || matches!(err.raw_os_error(), Some(code) if code == libc::EPERM),
+        "expected permission denied operation, got {err:?}"
     );
 }
 
@@ -788,7 +785,7 @@ fn fuse_e2e_flush_does_not_require_fsync() -> Result<(), Box<dyn Error>> {
 
 #[test]
 #[ignore]
-fn fuse_e2e_hard_link_and_copy_cover_rustc_style_file_duplication() -> Result<(), Box<dyn Error>> {
+fn fuse_e2e_hard_link_and_copy_cover_mutable_to_mutable_semantics() -> Result<(), Box<dyn Error>> {
     require_fuse_prerequisites();
 
     let fixture = Fixture::new();
@@ -799,25 +796,91 @@ fn fuse_e2e_hard_link_and_copy_cover_rustc_style_file_duplication() -> Result<()
     let mounted_copy = fixture.workspace.join("docs/source-copy.bin");
     let host_link = fixture.docs_target.join("source-host-link.bin");
     let host_link_mounted = fixture.workspace.join("docs/source-host-link.bin");
-    let host_destination = fixture.docs_target.join("source-link.bin");
 
     fs::write(&mounted_source, "alpha-beta-gamma")?;
 
     fs::hard_link(fixture.docs_target.join("source.bin"), &host_link)?;
     assert_eq!(fs::read_to_string(&host_link_mounted)?, "alpha-beta-gamma");
 
-    let hard_link_err = fs::hard_link(&mounted_source, &mounted_link).unwrap_err();
-    assert_unsupported_operation(&hard_link_err);
-    assert!(!mounted_link.exists());
-    assert!(!host_destination.exists());
+    fs::hard_link(&mounted_source, &mounted_link)?;
+    assert_eq!(fs::read_to_string(&mounted_link)?, "alpha-beta-gamma");
+    assert_eq!(fs::read_to_string(&mounted_source)?, "alpha-beta-gamma");
 
-    fs::copy(&mounted_source, &mounted_copy)?;
-    assert_eq!(fs::read_to_string(&mounted_copy)?, "alpha-beta-gamma");
+    fs::write(&mounted_link, "updated-through-link")?;
+    assert_eq!(fs::read_to_string(&mounted_source)?, "updated-through-link");
     assert_eq!(
-        fs::read_to_string(fixture.docs_target.join("source-copy.bin"))?,
-        "alpha-beta-gamma"
+        fs::read_to_string(&host_link_mounted)?,
+        "updated-through-link"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.docs_target.join("source.bin"))?,
+        "updated-through-link"
     );
 
+    fs::copy(&mounted_source, &mounted_copy)?;
+    assert_eq!(fs::read_to_string(&mounted_copy)?, "updated-through-link");
+    assert_eq!(
+        fs::read_to_string(fixture.docs_target.join("source-copy.bin"))?,
+        "updated-through-link"
+    );
+
+    let stop = run(&["stop", &fixture.workspace_arg()], &fixture.envs());
+    assert!(stop.status.success(), "{}", output_text(&stop));
+    wait_for_mounted_state(&fixture, false);
+
+    Ok(())
+}
+
+#[test]
+#[ignore]
+fn fuse_e2e_hard_link_rejects_immutable_source_and_destination() -> Result<(), Box<dyn Error>> {
+    require_fuse_prerequisites();
+
+    let fixture = Fixture::new();
+    start_rw_workspace(&fixture);
+
+    fs::create_dir_all(fixture.docs_target.join(".git"))?;
+    fs::create_dir_all(fixture.docs_target.join(".jj"))?;
+    fs::write(
+        fixture.docs_target.join(".git/source.bin"),
+        "immutable-source",
+    )?;
+    fs::write(
+        fixture.docs_target.join("mutable-source.bin"),
+        "mutable-source",
+    )?;
+
+    let script_path = std::env::temp_dir().join(format!(
+        "workspace-portal-edit-hardlink-{}.sh",
+        std::process::id()
+    ));
+    fs::write(
+        &script_path,
+        b"#!/bin/sh\nsed -i -e 's/^immutable_segments = \\[\\]$/immutable_segments = [\".git\", \".jj\"]/' \"$1\"\n",
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script_path, Permissions::from_mode(0o755))?;
+    }
+
+    let edited = run_edit_with_editor(&fixture, &script_path);
+    assert!(edited.status.success(), "{}", output_text(&edited));
+
+    let immutable_source = fixture.workspace.join("docs/.git/source.bin");
+    let mutable_destination = fixture.workspace.join("docs/mutable-link.bin");
+    let mutable_source = fixture.workspace.join("docs/mutable-source.bin");
+    let immutable_destination = fixture.workspace.join("docs/.jj/mutable-link.bin");
+
+    let source_err = fs::hard_link(&immutable_source, &mutable_destination).unwrap_err();
+    assert_permission_denied_operation(&source_err);
+    assert!(!mutable_destination.exists());
+
+    let destination_err = fs::hard_link(&mutable_source, &immutable_destination).unwrap_err();
+    assert_permission_denied_operation(&destination_err);
+    assert!(!immutable_destination.exists());
+
+    let _ = fs::remove_file(&script_path);
     let stop = run(&["stop", &fixture.workspace_arg()], &fixture.envs());
     assert!(stop.status.success(), "{}", output_text(&stop));
     wait_for_mounted_state(&fixture, false);
