@@ -3,7 +3,10 @@ use std::{env, path::PathBuf};
 use clap::{Parser, Subcommand};
 
 use crate::{
-    daemon::{self, CheckArgs, EditArgs, ForgetArgs, ListArgs, StartArgs, StatusArgs, StopArgs},
+    daemon::{
+        self, AuditHardlinksArgs, CheckArgs, EditArgs, ForgetArgs, ListArgs, StartArgs, StatusArgs,
+        StopArgs,
+    },
     error::{Error, Result},
 };
 
@@ -27,6 +30,24 @@ pub enum Commands {
     Check(CheckCommand),
     Edit(EditCommand),
     Forget(ForgetCommand),
+    Audit(AuditCommand),
+}
+
+#[derive(Debug, Parser)]
+pub struct AuditCommand {
+    #[command(subcommand)]
+    pub command: AuditCommands,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AuditCommands {
+    Hardlinks(HardlinkAuditCommand),
+}
+
+#[derive(Debug, Parser)]
+pub struct HardlinkAuditCommand {
+    /// Workspace to audit.
+    pub workspace: PathBuf,
 }
 
 #[derive(Debug, Parser)]
@@ -180,6 +201,14 @@ pub async fn run() -> Result<()> {
             })
             .await
         }
+        Commands::Audit(cmd) => match cmd.command {
+            AuditCommands::Hardlinks(cmd) => {
+                daemon::audit_hardlinks(AuditHardlinksArgs {
+                    workspace: cmd.workspace,
+                })
+                .await
+            }
+        },
     }
 }
 
