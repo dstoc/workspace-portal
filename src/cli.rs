@@ -4,8 +4,8 @@ use clap::{Parser, Subcommand};
 
 use crate::{
     daemon::{
-        self, AuditHardlinksArgs, CheckArgs, EditArgs, ForgetArgs, ListArgs, StartArgs, StatusArgs,
-        StopArgs,
+        self, AuditHardlinksArgs, AuditSymlinksArgs, CheckArgs, EditArgs, ForgetArgs, ListArgs,
+        StartArgs, StatusArgs, StopArgs,
     },
     error::{Error, Result},
 };
@@ -42,10 +42,17 @@ pub struct AuditCommand {
 #[derive(Debug, Subcommand)]
 pub enum AuditCommands {
     Hardlinks(HardlinkAuditCommand),
+    Symlinks(SymlinkAuditCommand),
 }
 
 #[derive(Debug, Parser)]
 pub struct HardlinkAuditCommand {
+    /// Workspace to audit.
+    pub workspace: PathBuf,
+}
+
+#[derive(Debug, Parser)]
+pub struct SymlinkAuditCommand {
     /// Workspace to audit.
     pub workspace: PathBuf,
 }
@@ -204,6 +211,12 @@ pub async fn run() -> Result<()> {
         Commands::Audit(cmd) => match cmd.command {
             AuditCommands::Hardlinks(cmd) => {
                 daemon::audit_hardlinks(AuditHardlinksArgs {
+                    workspace: cmd.workspace,
+                })
+                .await
+            }
+            AuditCommands::Symlinks(cmd) => {
+                daemon::audit_symlinks(AuditSymlinksArgs {
                     workspace: cmd.workspace,
                 })
                 .await
