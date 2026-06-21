@@ -40,6 +40,7 @@ The current codebase implements:
   - `check`
   - `forget`
   - `audit hardlinks`
+  - `audit symlinks`
 - a long-running control daemon over a Unix domain socket
 - persisted workspace state
 - workspace discovery by walking upward and checking registry state
@@ -249,17 +250,27 @@ Current behavior:
 
 ```bash
 workspace-portal audit hardlinks <workspace>
+workspace-portal audit symlinks <workspace>
 ```
 
 Current behavior:
 
-- scans the workspace targets for visible hard-link groups that cross immutable
-  and mutable portal paths
-- prints a no-findings message and exits with status `0` when nothing crosses
-  an immutable boundary
-- prints the matching inode groups and exits non-zero when findings are present
-- uses the current workspace state, so it can audit a stopped workspace from
-  persisted registry data
+- `audit hardlinks` scans the workspace targets for visible hard-link groups
+  that cross immutable and mutable portal paths
+- `audit hardlinks` prints a no-findings message and exits with status `0` when
+  nothing crosses an immutable boundary
+- `audit hardlinks` prints the matching inode groups and exits non-zero when
+  findings are present
+- `audit hardlinks` uses the current workspace state, so it can audit a stopped
+  workspace from persisted registry data
+- `audit symlinks` scans the workspace targets for symlink target text that
+  would resolve outside an entry if followed
+- `audit symlinks` prints a no-findings message and exits with status `0` when
+  no escaping symlink targets are found
+- `audit symlinks` prints the matching entry-relative paths and stored targets
+  and exits non-zero when findings are present
+- `audit symlinks` uses the current workspace state, so it can audit a stopped
+  workspace from persisted registry data
 
 ## Workspace discovery
 

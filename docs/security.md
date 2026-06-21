@@ -144,7 +144,12 @@ backing inode already has aliases under both immutable and mutable paths, writes
 through the mutable alias can still affect the immutable path's contents. The
 runtime does not scan for or block those aliases on every write; use
 `workspace-portal audit hardlinks <workspace>` to find visible hard-link groups
-that cross immutable and mutable portal paths.
+that cross immutable and mutable portal paths, and use
+`workspace-portal audit symlinks <workspace>` as a hygiene check for symlink
+target text that lexically escapes an entry. That symlink audit is diagnostic
+only: escaping target text is not itself a host escape because daemon-side
+resolution stays confined beneath the entry target and consumer-side resolution
+still happens in the consumer's namespace.
 
 ## Control-plane authorization
 
@@ -210,6 +215,11 @@ These are deliberate. Stating them is part of the design.
   path. Normal writes through the mutable path are not runtime-blocked. Run
   `workspace-portal audit hardlinks <workspace>` to detect visible aliases of
   this kind.
+- **Escaping symlink target text inside an entry.** A symlink whose stored
+  target text points outside the entry is not a host escape by itself, because
+  daemon-side resolution remains confined and consumer-side resolution happens
+  in the consumer namespace. Run `workspace-portal audit symlinks <workspace>`
+  to spot this hygiene issue before enabling symlink traversal for a workload.
 - **Environmental dependencies.** `chmod`/`utimens` confinement uses
   `/proc/self/fd` on a pinned `O_PATH` fd (safe, but requires `/proc` mounted in
   the daemon's namespace); confinement requires Linux ≥ 5.6 for `openat2` and is
