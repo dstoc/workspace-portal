@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.7](https://github.com/dstoc/workspace-portal/compare/workspace-portal-v0.1.6...workspace-portal-v0.1.7) (2026-06-21)
+
+
+### Features
+
+* add hardlink audit command ([075c0a4](https://github.com/dstoc/workspace-portal/commit/075c0a430fd5d2068b49b894fe2ac0115258fd13))
+* add symlink escape audit ([827122f](https://github.com/dstoc/workspace-portal/commit/827122f96a7d2acfb8e62ec6fa24c93c861f0e84))
+* restore scoped hard links ([a8328ad](https://github.com/dstoc/workspace-portal/commit/a8328ad078a75f4d74b13c56361d9f6e79f72dc2))
+
 ## [0.1.6](https://github.com/dstoc/workspace-portal/compare/workspace-portal-v0.1.5...workspace-portal-v0.1.6) (2026-06-21)
 
 
