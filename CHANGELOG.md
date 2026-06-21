@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.6](https://github.com/dstoc/workspace-portal/compare/workspace-portal-v0.1.5...workspace-portal-v0.1.6) (2026-06-21)
+
+
+### Features
+
+* forget stopped workspace metadata ([84e6383](https://github.com/dstoc/workspace-portal/commit/84e6383195a0ed03954b508aeb14aabb6b04c997))
+* remove edit-redundant entry commands ([d0a957a](https://github.com/dstoc/workspace-portal/commit/d0a957a5c64729684cc452d7f41efc70dbe06e52))
+* use positional workspace arguments ([1c50816](https://github.com/dstoc/workspace-portal/commit/1c50816f4c5419547fbd881e376d9087bc81b632))
+
 ## [0.1.5](https://github.com/dstoc/workspace-portal/compare/workspace-portal-v0.1.4...workspace-portal-v0.1.5) (2026-06-19)
 
 
