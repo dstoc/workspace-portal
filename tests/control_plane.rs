@@ -8,6 +8,8 @@ use std::{
 };
 
 #[cfg(unix)]
+use std::os::unix::fs::symlink;
+#[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 
 use workspace_portal::{
@@ -242,6 +244,83 @@ fn audit_hardlinks_help_exposes_the_subcommand() {
     assert!(text.contains("Usage: workspace-portal audit hardlinks <WORKSPACE>"));
     assert!(text.contains("Workspace to audit"));
     assert!(text.contains("hardlinks"));
+}
+
+#[test]
+fn audit_symlinks_help_exposes_the_subcommand() {
+    let envs: [(&str, &Path); 0] = [];
+    let help = run(&["audit", "symlinks", "--help"], &envs);
+
+    assert!(help.status.success(), "{}", output_text(&help));
+    let text = output_text(&help);
+    assert!(text.contains("Usage: workspace-portal audit symlinks <WORKSPACE>"));
+    assert!(text.contains("Workspace to audit"));
+    assert!(text.contains("symlinks"));
+}
+
+#[cfg(unix)]
+#[test]
+fn audit_symlinks_reports_absolute_and_relative_escaping_targets() {
+    let fixture = Fixture::new();
+    let entry_root = fixture.target.join("docs");
+    let src_dir = entry_root.join("src");
+
+    fs::create_dir_all(&src_dir).unwrap();
+
+    symlink("/etc/passwd", entry_root.join("absolute")).unwrap();
+    symlink("../../outside", src_dir.join("escape")).unwrap();
+
+    write_workspace_state(
+        &fixture,
+        &[EntryRecord::new(
+            "docs",
+            entry_root.clone(),
+            AccessMode::ReadWrite,
+        )],
+        &[],
+    );
+
+    let audit = run(
+        &["audit", "symlinks", &fixture.workspace_arg()],
+        &fixture.envs(),
+    );
+    assert!(!audit.status.success(), "{}", output_text(&audit));
+
+    let text = output_text(&audit);
+    assert!(text.contains("symlinks resolving outside entry targets"));
+    assert!(text.contains("docs:absolute -> /etc/passwd"));
+    assert!(text.contains("docs:src/escape -> ../../outside"));
+}
+
+#[cfg(unix)]
+#[test]
+fn audit_symlinks_ignores_in_entry_and_broken_in_entry_targets() {
+    let fixture = Fixture::new();
+    let entry_root = fixture.target.join("docs");
+    let src_dir = entry_root.join("src");
+
+    fs::create_dir_all(&src_dir).unwrap();
+    fs::write(entry_root.join("README.md"), "symlink-audit").unwrap();
+
+    symlink("../README.md", src_dir.join("readme-link")).unwrap();
+    symlink("missing/file", src_dir.join("broken-link")).unwrap();
+
+    write_workspace_state(
+        &fixture,
+        &[EntryRecord::new(
+            "docs",
+            entry_root.clone(),
+            AccessMode::ReadWrite,
+        )],
+        &[],
+    );
+
+    let audit = run(
+        &["audit", "symlinks", &fixture.workspace_arg()],
+        &fixture.envs(),
+    );
+    assert!(audit.status.success(), "{}", output_text(&audit));
+    assert!(output_text(&audit).contains("no symlinks resolving outside entry targets found"));
 }
 
 #[test]
