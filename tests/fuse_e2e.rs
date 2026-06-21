@@ -167,26 +167,12 @@ impl Fixture {
     fn workspace_arg(&self) -> String {
         self.workspace.display().to_string()
     }
-
-    fn docs_target_arg(&self) -> String {
-        self.docs_target.display().to_string()
-    }
-
-    fn notes_target_arg(&self) -> String {
-        self.notes_target.display().to_string()
-    }
 }
 
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = run(
-            &[
-                "stop",
-                "--workspace",
-                &self.workspace_arg(),
-                "--force",
-                "--lazy",
-            ],
+            &["stop", &self.workspace_arg(), "--force", "--lazy"],
             &self.envs(),
         );
         let _ = fs::remove_dir_all(&self.root);
@@ -195,7 +181,7 @@ impl Drop for Fixture {
 
 fn status_json(fixture: &Fixture) -> Value {
     let status = run(
-        &["status", "--workspace", &fixture.workspace_arg(), "--json"],
+        &["status", &fixture.workspace_arg(), "--json"],
         &fixture.envs(),
     );
     assert!(status.status.success(), "{}", output_text(&status));
@@ -219,21 +205,45 @@ fn wait_for_mounted_file_contents(path: &Path, expected: &str) -> bool {
     })
 }
 
+fn set_workspace_entries(fixture: &Fixture, entries: &[(&str, &Path, &str)]) {
+    let mut config = String::from("version = 1\nreadlink = true\nimmutable_segments = []\n");
+    for (name, target, mode) in entries {
+        config.push_str(&format!(
+            "\n[entries.{}]\ntarget = \"{}\"\nmode = \"{}\"\n",
+            name,
+            toml_escape(&target.display().to_string()),
+            mode
+        ));
+    }
+
+    let script_path = std::env::temp_dir().join(format!(
+        "workspace-portal-edit-set-{}.sh",
+        std::process::id()
+    ));
+    fs::write(
+        &script_path,
+        format!("#!/bin/sh\ncat > \"$1\" <<'EOF'\n{config}EOF\n"),
+    )
+    .expect("write edit script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script_path, Permissions::from_mode(0o755))
+            .expect("make edit script executable");
+    }
+
+    let edit = run_edit_with_editor(fixture, &script_path);
+    let _ = fs::remove_file(&script_path);
+    assert!(edit.status.success(), "{}", output_text(&edit));
+}
+
+fn toml_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 fn start_rw_workspace(fixture: &Fixture) {
     start_workspace(fixture);
-
-    let add = run(
-        &[
-            "add",
-            &fixture.docs_target_arg(),
-            "docs",
-            "--workspace",
-            &fixture.workspace_arg(),
-            "--rw",
-        ],
-        &fixture.envs(),
-    );
-    assert!(add.status.success(), "{}", output_text(&add));
+    set_workspace_entries(fixture, &[("docs", fixture.docs_target.as_path(), "rw")]);
 }
 
 fn start_workspace(fixture: &Fixture) {
@@ -278,13 +288,7 @@ fn prerequisite_skip_reason() -> Option<String> {
     if start.status.success() {
         wait_for_mounted_state(&probe, true);
         let stop = run(
-            &[
-                "stop",
-                "--workspace",
-                &probe.workspace_arg(),
-                "--force",
-                "--lazy",
-            ],
+            &["stop", &probe.workspace_arg(), "--force", "--lazy"],
             &probe.envs(),
         );
         assert!(stop.status.success(), "{}", output_text(&stop));
@@ -322,18 +326,7 @@ fn fuse_e2e_happy_path_covers_mount_read_write_remove_and_unmount() -> Result<()
     assert!(start.status.success(), "{}", output_text(&start));
     wait_for_mounted_state(&fixture, true);
 
-    let add = run(
-        &[
-            "add",
-            &fixture.docs_target_arg(),
-            "docs",
-            "--workspace",
-            &fixture.workspace_arg(),
-            "--rw",
-        ],
-        &fixture.envs(),
-    );
-    assert!(add.status.success(), "{}", output_text(&add));
+    set_workspace_entries(&fixture, &[("docs", fixture.docs_target.as_path(), "rw")]);
 
     let mount_read = fs::read_to_string(fixture.workspace.join("docs/readme.txt"))?;
     assert_eq!(mount_read, "read-through-mount");
@@ -357,11 +350,7 @@ fn fuse_e2e_happy_path_covers_mount_read_write_remove_and_unmount() -> Result<()
         "written through mount"
     );
 
-    let rm = run(
-        &["rm", "docs", "--workspace", &fixture.workspace_arg()],
-        &fixture.envs(),
-    );
-    assert!(rm.status.success(), "{}", output_text(&rm));
+    set_workspace_entries(&fixture, &[]);
 
     assert!(
         wait_for(Duration::from_secs(5), || !fixture
@@ -371,10 +360,7 @@ fn fuse_e2e_happy_path_covers_mount_read_write_remove_and_unmount() -> Result<()
         "mounted entry never disappeared after removal"
     );
 
-    let stop = run(
-        &["stop", "--workspace", &fixture.workspace_arg()],
-        &fixture.envs(),
-    );
+    let stop = run(&["stop", &fixture.workspace_arg()], &fixture.envs());
     assert!(stop.status.success(), "{}", output_text(&stop));
     wait_for_mounted_state(&fixture, false);
 
@@ -408,18 +394,7 @@ fn fuse_e2e_symlinks_cover_traversal_and_broken_targets() -> Result<(), Box<dyn 
     assert!(start.status.success(), "{}", output_text(&start));
     wait_for_mounted_state(&fixture, true);
 
-    let add = run(
-        &[
-            "add",
-            &fixture.docs_target_arg(),
-            "docs",
-            "--workspace",
-            &fixture.workspace_arg(),
-            "--rw",
-        ],
-        &fixture.envs(),
-    );
-    assert!(add.status.success(), "{}", output_text(&add));
+    set_workspace_entries(&fixture, &[("docs", fixture.docs_target.as_path(), "rw")]);
 
     let shortcut = fixture.workspace.join("docs/shortcut.txt");
     assert!(fs::symlink_metadata(&shortcut)?.file_type().is_symlink());
@@ -433,10 +408,7 @@ fn fuse_e2e_symlinks_cover_traversal_and_broken_targets() -> Result<(), Box<dyn 
     let broken_read = fs::read_to_string(&shortcut).unwrap_err();
     assert_eq!(broken_read.kind(), ErrorKind::NotFound);
 
-    let stop = run(
-        &["stop", "--workspace", &fixture.workspace_arg()],
-        &fixture.envs(),
-    );
+    let stop = run(&["stop", &fixture.workspace_arg()], &fixture.envs());
     assert!(stop.status.success(), "{}", output_text(&stop));
     wait_for_mounted_state(&fixture, false);
 
@@ -475,18 +447,7 @@ fn fuse_e2e_nosymfollow_keeps_symlinks_visible_but_blocks_traversal() -> Result<
     assert!(start.status.success(), "{}", output_text(&start));
     wait_for_mounted_state(&fixture, true);
 
-    let add = run(
-        &[
-            "add",
-            &fixture.docs_target_arg(),
-            "docs",
-            "--workspace",
-            &fixture.workspace_arg(),
-            "--rw",
-        ],
-        &fixture.envs(),
-    );
-    assert!(add.status.success(), "{}", output_text(&add));
+    set_workspace_entries(&fixture, &[("docs", fixture.docs_target.as_path(), "rw")]);
 
     let shortcut = fixture.workspace.join("docs/shortcut.txt");
     assert!(fs::symlink_metadata(&shortcut)?.file_type().is_symlink());
@@ -501,10 +462,7 @@ fn fuse_e2e_nosymfollow_keeps_symlinks_visible_but_blocks_traversal() -> Result<
     assert_eq!(fs::read_link(&linked_dir)?, PathBuf::from("nested"));
     assert!(fs::read_to_string(fixture.workspace.join("docs/linked-dir/payload.txt")).is_err());
 
-    let stop = run(
-        &["stop", "--workspace", &fixture.workspace_arg()],
-        &fixture.envs(),
-    );
+    let stop = run(&["stop", &fixture.workspace_arg()], &fixture.envs());
     assert!(stop.status.success(), "{}", output_text(&stop));
     wait_for_mounted_state(&fixture, false);
 
@@ -528,31 +486,13 @@ fn fuse_e2e_soft_revocation_and_status_coherency_covers_multiple_active_entries(
     assert!(start.status.success(), "{}", output_text(&start));
     wait_for_mounted_state(&fixture, true);
 
-    let add_docs = run(
+    set_workspace_entries(
+        &fixture,
         &[
-            "add",
-            &fixture.docs_target_arg(),
-            "docs",
-            "--workspace",
-            &fixture.workspace_arg(),
-            "--rw",
+            ("docs", fixture.docs_target.as_path(), "rw"),
+            ("notes", fixture.notes_target.as_path(), "ro"),
         ],
-        &fixture.envs(),
     );
-    assert!(add_docs.status.success(), "{}", output_text(&add_docs));
-
-    let add_notes = run(
-        &[
-            "add",
-            &fixture.notes_target_arg(),
-            "notes",
-            "--workspace",
-            &fixture.workspace_arg(),
-            "--ro",
-        ],
-        &fixture.envs(),
-    );
-    assert!(add_notes.status.success(), "{}", output_text(&add_notes));
 
     assert!(
         wait_for(Duration::from_secs(5), || {
@@ -588,11 +528,7 @@ fn fuse_e2e_soft_revocation_and_status_coherency_covers_multiple_active_entries(
     );
     let mut open_handle = OpenOptions::new().read(true).open(&docs_mounted)?;
 
-    let rm = run(
-        &["rm", "docs", "--workspace", &fixture.workspace_arg()],
-        &fixture.envs(),
-    );
-    assert!(rm.status.success(), "{}", output_text(&rm));
+    set_workspace_entries(&fixture, &[("notes", fixture.notes_target.as_path(), "ro")]);
 
     assert!(
         wait_for(Duration::from_secs(5), || mounted_entry_names(&fixture)
@@ -627,10 +563,7 @@ fn fuse_e2e_soft_revocation_and_status_coherency_covers_multiple_active_entries(
         "beta-v3"
     );
 
-    let stop = run(
-        &["stop", "--workspace", &fixture.workspace_arg()],
-        &fixture.envs(),
-    );
+    let stop = run(&["stop", &fixture.workspace_arg()], &fixture.envs());
     assert!(stop.status.success(), "{}", output_text(&stop));
     wait_for_mounted_state(&fixture, false);
     assert_eq!(status_json(&fixture)["mounted"].as_bool(), Some(false));
@@ -649,28 +582,14 @@ fn fuse_e2e_restart_after_stop_covers_state_recovery_and_remounting() -> Result<
 
     start_workspace(&fixture);
 
-    let add = run(
-        &[
-            "add",
-            &fixture.docs_target_arg(),
-            "docs",
-            "--workspace",
-            &fixture.workspace_arg(),
-            "--rw",
-        ],
-        &fixture.envs(),
-    );
-    assert!(add.status.success(), "{}", output_text(&add));
+    set_workspace_entries(&fixture, &[("docs", fixture.docs_target.as_path(), "rw")]);
     assert_eq!(mounted_entry_names(&fixture)?, vec!["docs".to_owned()]);
     assert_eq!(
         fs::read_to_string(fixture.workspace.join("docs/recovery.txt"))?,
         "recovery-state"
     );
 
-    let stop = run(
-        &["stop", "--workspace", &fixture.workspace_arg()],
-        &fixture.envs(),
-    );
+    let stop = run(&["stop", &fixture.workspace_arg()], &fixture.envs());
     assert!(stop.status.success(), "{}", output_text(&stop));
     wait_for_mounted_state(&fixture, false);
     assert_eq!(status_json(&fixture)["mounted"].as_bool(), Some(false));
@@ -683,10 +602,7 @@ fn fuse_e2e_restart_after_stop_covers_state_recovery_and_remounting() -> Result<
         "recovery-state"
     );
 
-    let stop = run(
-        &["stop", "--workspace", &fixture.workspace_arg()],
-        &fixture.envs(),
-    );
+    let stop = run(&["stop", &fixture.workspace_arg()], &fixture.envs());
     assert!(stop.status.success(), "{}", output_text(&stop));
     wait_for_mounted_state(&fixture, false);
 
@@ -738,10 +654,7 @@ fn fuse_e2e_directory_lifecycle_covers_nested_mkdir_rmdir_and_traversal()
     assert!(!fixture.docs_target.join("projects").exists());
     assert!(!fixture.workspace.join("docs/projects").exists());
 
-    let stop = run(
-        &["stop", "--workspace", &fixture.workspace_arg()],
-        &fixture.envs(),
-    );
+    let stop = run(&["stop", &fixture.workspace_arg()], &fixture.envs());
     assert!(stop.status.success(), "{}", output_text(&stop));
     wait_for_mounted_state(&fixture, false);
 
@@ -809,10 +722,7 @@ fn fuse_e2e_file_lifecycle_covers_create_append_overwrite_truncate_and_fsync()
     assert_eq!(fs::read_to_string(&mounted)?, "del");
     assert_eq!(fs::read_to_string(&host)?, "del");
 
-    let stop = run(
-        &["stop", "--workspace", &fixture.workspace_arg()],
-        &fixture.envs(),
-    );
+    let stop = run(&["stop", &fixture.workspace_arg()], &fixture.envs());
     assert!(stop.status.success(), "{}", output_text(&stop));
     wait_for_mounted_state(&fixture, false);
 
@@ -842,10 +752,7 @@ fn fuse_e2e_touch_create_allows_noop_owner_setattr() -> Result<(), Box<dyn Error
     );
     assert!(host.exists(), "touched file should exist in backing target");
 
-    let stop = run(
-        &["stop", "--workspace", &fixture.workspace_arg()],
-        &fixture.envs(),
-    );
+    let stop = run(&["stop", &fixture.workspace_arg()], &fixture.envs());
     assert!(stop.status.success(), "{}", output_text(&stop));
     wait_for_mounted_state(&fixture, false);
 
@@ -872,10 +779,7 @@ fn fuse_e2e_flush_does_not_require_fsync() -> Result<(), Box<dyn Error>> {
     assert_eq!(fs::read_to_string(&mounted)?, "hello-no-fsync");
     assert_eq!(fs::read_to_string(&host)?, "hello-no-fsync");
 
-    let stop = run(
-        &["stop", "--workspace", &fixture.workspace_arg()],
-        &fixture.envs(),
-    );
+    let stop = run(&["stop", &fixture.workspace_arg()], &fixture.envs());
     assert!(stop.status.success(), "{}", output_text(&stop));
     wait_for_mounted_state(&fixture, false);
 
@@ -914,10 +818,7 @@ fn fuse_e2e_hard_link_and_copy_cover_rustc_style_file_duplication() -> Result<()
         "alpha-beta-gamma"
     );
 
-    let stop = run(
-        &["stop", "--workspace", &fixture.workspace_arg()],
-        &fixture.envs(),
-    );
+    let stop = run(&["stop", &fixture.workspace_arg()], &fixture.envs());
     assert!(stop.status.success(), "{}", output_text(&stop));
     wait_for_mounted_state(&fixture, false);
 
@@ -961,10 +862,7 @@ fn fuse_e2e_rename_destination_is_immediately_openable() -> Result<(), Box<dyn E
         fs::remove_dir(&tmp_dir)?;
     }
 
-    let stop = run(
-        &["stop", "--workspace", &fixture.workspace_arg()],
-        &fixture.envs(),
-    );
+    let stop = run(&["stop", &fixture.workspace_arg()], &fixture.envs());
     assert!(stop.status.success(), "{}", output_text(&stop));
     wait_for_mounted_state(&fixture, false);
 
@@ -987,31 +885,13 @@ fn fuse_e2e_rejects_ro_writes_and_cross_entry_rename() -> Result<(), Box<dyn Err
     assert!(start.status.success(), "{}", output_text(&start));
     wait_for_mounted_state(&fixture, true);
 
-    let add_docs = run(
+    set_workspace_entries(
+        &fixture,
         &[
-            "add",
-            &fixture.docs_target_arg(),
-            "docs",
-            "--workspace",
-            &fixture.workspace_arg(),
-            "--rw",
+            ("docs", fixture.docs_target.as_path(), "rw"),
+            ("notes", fixture.notes_target.as_path(), "ro"),
         ],
-        &fixture.envs(),
     );
-    assert!(add_docs.status.success(), "{}", output_text(&add_docs));
-
-    let add_notes = run(
-        &[
-            "add",
-            &fixture.notes_target_arg(),
-            "notes",
-            "--workspace",
-            &fixture.workspace_arg(),
-            "--ro",
-        ],
-        &fixture.envs(),
-    );
-    assert!(add_notes.status.success(), "{}", output_text(&add_notes));
 
     let ro_write = fs::write(fixture.workspace.join("notes/rejected.txt"), "nope");
     assert!(
@@ -1028,10 +908,7 @@ fn fuse_e2e_rejects_ro_writes_and_cross_entry_rename() -> Result<(), Box<dyn Err
         "cross-entry rename unexpectedly succeeded"
     );
 
-    let stop = run(
-        &["stop", "--workspace", &fixture.workspace_arg()],
-        &fixture.envs(),
-    );
+    let stop = run(&["stop", &fixture.workspace_arg()], &fixture.envs());
     assert!(stop.status.success(), "{}", output_text(&stop));
     wait_for_mounted_state(&fixture, false);
 
@@ -1047,19 +924,13 @@ fn fuse_e2e_symlink_creation() -> Result<(), Box<dyn Error>> {
     let fixture = Fixture::new();
     start_rw_workspace(&fixture);
 
-    // Add notes as ro
-    let add_notes = run(
+    set_workspace_entries(
+        &fixture,
         &[
-            "add",
-            &fixture.notes_target_arg(),
-            "notes",
-            "--workspace",
-            &fixture.workspace_arg(),
-            "--ro",
+            ("docs", fixture.docs_target.as_path(), "rw"),
+            ("notes", fixture.notes_target.as_path(), "ro"),
         ],
-        &fixture.envs(),
     );
-    assert!(add_notes.status.success(), "{}", output_text(&add_notes));
 
     // Step 2 & 3: create symlink in rw entry
     let link_path = fixture.workspace.join("docs/my-link");
@@ -1093,10 +964,7 @@ fn fuse_e2e_symlink_creation() -> Result<(), Box<dyn Error>> {
         "symlink creation at workspace root should have failed"
     );
 
-    let stop = run(
-        &["stop", "--workspace", &fixture.workspace_arg()],
-        &fixture.envs(),
-    );
+    let stop = run(&["stop", &fixture.workspace_arg()], &fixture.envs());
     assert!(stop.status.success(), "{}", output_text(&stop));
     wait_for_mounted_state(&fixture, false);
 
@@ -1159,31 +1027,13 @@ fn fuse_e2e_setattr_persists_timestamps() -> Result<(), Box<dyn Error>> {
     assert!(start.status.success(), "{}", output_text(&start));
     wait_for_mounted_state(&fixture, true);
 
-    let add_docs = run(
+    set_workspace_entries(
+        &fixture,
         &[
-            "add",
-            &fixture.docs_target_arg(),
-            "docs",
-            "--workspace",
-            &fixture.workspace_arg(),
-            "--rw",
+            ("docs", fixture.docs_target.as_path(), "rw"),
+            ("notes", fixture.notes_target.as_path(), "ro"),
         ],
-        &fixture.envs(),
     );
-    assert!(add_docs.status.success(), "{}", output_text(&add_docs));
-
-    let add_notes = run(
-        &[
-            "add",
-            &fixture.notes_target_arg(),
-            "notes",
-            "--workspace",
-            &fixture.workspace_arg(),
-            "--ro",
-        ],
-        &fixture.envs(),
-    );
-    assert!(add_notes.status.success(), "{}", output_text(&add_notes));
 
     let mount_file = fixture.workspace.join("docs/file.txt");
     let host_file = fixture.docs_target.join("file.txt");
@@ -1464,10 +1314,7 @@ fn fuse_e2e_setattr_persists_timestamps() -> Result<(), Box<dyn Error>> {
     // -----------------------------------------------------------------------
     // Teardown
     // -----------------------------------------------------------------------
-    let stop = run(
-        &["stop", "--workspace", &fixture.workspace_arg()],
-        &fixture.envs(),
-    );
+    let stop = run(&["stop", &fixture.workspace_arg()], &fixture.envs());
     assert!(stop.status.success(), "{}", output_text(&stop));
     wait_for_mounted_state(&fixture, false);
 
@@ -1484,7 +1331,7 @@ fn run_edit_with_editor(fixture: &Fixture, editor_script: &Path) -> Output {
     let mut env_vec: Vec<(&str, &Path)> = base_envs.to_vec();
     env_vec.push(("VISUAL", editor_script));
     env_vec.push(("EDITOR", editor_script));
-    run(&["edit", "--workspace", &fixture.workspace_arg()], &env_vec)
+    run(&["edit", &fixture.workspace_arg()], &env_vec)
 }
 
 #[test]
@@ -1556,10 +1403,7 @@ fn fuse_e2e_edit_rw_to_ro_preserves_held_write_handle() -> Result<(), Box<dyn Er
 
     // Clean up.
     let _ = fs::remove_file(&script_path);
-    let stop = run(
-        &["stop", "--workspace", &fixture.workspace_arg()],
-        &fixture.envs(),
-    );
+    let stop = run(&["stop", &fixture.workspace_arg()], &fixture.envs());
     assert!(stop.status.success(), "{}", output_text(&stop));
     wait_for_mounted_state(&fixture, false);
 
@@ -1613,10 +1457,7 @@ fn fuse_e2e_edit_toml_buffer_updates_mode_and_immutable_segments() -> Result<(),
     );
 
     let _ = fs::remove_file(&script_path);
-    let stop = run(
-        &["stop", "--workspace", &fixture.workspace_arg()],
-        &fixture.envs(),
-    );
+    let stop = run(&["stop", &fixture.workspace_arg()], &fixture.envs());
     assert!(stop.status.success(), "{}", output_text(&stop));
     wait_for_mounted_state(&fixture, false);
 
@@ -1685,10 +1526,7 @@ fn fuse_e2e_edit_readlink_false_blocks_symlink_traversal_and_readlink() -> Resul
     let _ = open_err;
 
     let _ = fs::remove_file(&script_path);
-    let stop = run(
-        &["stop", "--workspace", &fixture.workspace_arg()],
-        &fixture.envs(),
-    );
+    let stop = run(&["stop", &fixture.workspace_arg()], &fixture.envs());
     assert!(stop.status.success(), "{}", output_text(&stop));
     wait_for_mounted_state(&fixture, false);
 
@@ -1770,10 +1608,7 @@ fn fuse_e2e_backing_store_swap_stays_confined_to_entry() -> Result<(), Box<dyn E
     // would make the (non-force) unmount fail.
     drop(held);
 
-    let stop = run(
-        &["stop", "--workspace", &fixture.workspace_arg()],
-        &fixture.envs(),
-    );
+    let stop = run(&["stop", &fixture.workspace_arg()], &fixture.envs());
     assert!(stop.status.success(), "{}", output_text(&stop));
     wait_for_mounted_state(&fixture, false);
 
@@ -1814,10 +1649,7 @@ fn fuse_e2e_edit_unchanged_buffer_reports_no_changes() -> Result<(), Box<dyn Err
         "docs entry mode must remain 'rw' after no-op edit"
     );
 
-    let stop = run(
-        &["stop", "--workspace", &fixture.workspace_arg()],
-        &fixture.envs(),
-    );
+    let stop = run(&["stop", &fixture.workspace_arg()], &fixture.envs());
     assert!(stop.status.success(), "{}", output_text(&stop));
     wait_for_mounted_state(&fixture, false);
 
@@ -1869,17 +1701,7 @@ fn fuse_e2e_allow_other_enforces_file_permissions() -> Result<(), Box<dyn Error>
     // Start the workspace with --allow-other and add docs as a read-only entry.
     start_workspace_allow_other(&fixture);
 
-    let add = run(
-        &[
-            "add",
-            &fixture.docs_target_arg(),
-            "docs",
-            "--workspace",
-            &fixture.workspace_arg(),
-        ],
-        &fixture.envs(),
-    );
-    assert!(add.status.success(), "{}", output_text(&add));
+    set_workspace_entries(&fixture, &[("docs", fixture.docs_target.as_path(), "rw")]);
 
     // Wait until the docs entry is visible in the mount.
     assert!(
@@ -1941,10 +1763,7 @@ fn fuse_e2e_allow_other_enforces_file_permissions() -> Result<(), Box<dyn Error>
 
     // Teardown — Fixture::drop handles unmounting, but we stop explicitly so
     // the test is self-contained and failures are surfaced cleanly.
-    let stop = run(
-        &["stop", "--workspace", &fixture.workspace_arg()],
-        &fixture.envs(),
-    );
+    let stop = run(&["stop", &fixture.workspace_arg()], &fixture.envs());
     assert!(stop.status.success(), "{}", output_text(&stop));
     wait_for_mounted_state(&fixture, false);
 

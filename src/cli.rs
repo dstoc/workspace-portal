@@ -80,10 +80,7 @@ pub struct StartCommand {
 
 #[derive(Debug, Parser)]
 pub struct StatusCommand {
-    #[arg(
-        long,
-        help = "Override workspace discovery with an explicit workspace path"
-    )]
+    /// Workspace to inspect. Defaults to discovering one from the current directory.
     pub workspace: Option<PathBuf>,
 
     #[arg(
@@ -95,10 +92,7 @@ pub struct StatusCommand {
 
 #[derive(Debug, Parser)]
 pub struct StopCommand {
-    #[arg(
-        long,
-        help = "Override workspace discovery with an explicit workspace path"
-    )]
+    /// Workspace to stop. Defaults to discovering one from the current directory.
     pub workspace: Option<PathBuf>,
 
     #[arg(long, help = "Use lazy unmount when stopping the workspace")]
@@ -110,19 +104,13 @@ pub struct StopCommand {
 
 #[derive(Debug, Parser)]
 pub struct CheckCommand {
-    #[arg(
-        long,
-        help = "Override workspace discovery with an explicit workspace path"
-    )]
+    /// Workspace to check. Defaults to discovering one from the current directory.
     pub workspace: Option<PathBuf>,
 }
 
 #[derive(Debug, Parser)]
 pub struct EditCommand {
-    #[arg(
-        long,
-        help = "Override workspace discovery with an explicit workspace path"
-    )]
+    /// Workspace to edit. Defaults to discovering one from the current directory.
     pub workspace: Option<PathBuf>,
 }
 

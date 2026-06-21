@@ -1,14 +1,14 @@
 use std::{
     env,
     error::Error,
-    fs,
+    fs::{self, Permissions},
     path::{Path, PathBuf},
     process::{Command, Output},
     sync::atomic::{AtomicUsize, Ordering},
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::FileTypeExt;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -129,12 +129,28 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let _ = run(
-            &["stop", "--workspace", &self.workspace_arg(), "--force"],
-            &self.envs(),
-        );
+        let _ = run(&["stop", &self.workspace_arg(), "--force"], &self.envs());
         let _ = fs::remove_dir_all(self.workspace.parent().unwrap());
     }
+}
+
+fn edit_workspace_config(fixture: &Fixture, config: &str) -> Output {
+    let script = unique_dir("editor").with_extension("sh");
+    fs::write(
+        &script,
+        format!("#!/bin/sh\ncat > \"$1\" <<'EOF'\n{config}\nEOF\n"),
+    )
+    .unwrap();
+    fs::set_permissions(&script, Permissions::from_mode(0o755)).unwrap();
+
+    let base_envs = fixture.envs();
+    let mut envs: Vec<(&str, &Path)> = base_envs.to_vec();
+    envs.push(("VISUAL", script.as_path()));
+    envs.push(("EDITOR", script.as_path()));
+
+    let output = run(&["edit", &fixture.workspace_arg()], &envs);
+    let _ = fs::remove_file(script);
+    output
 }
 
 #[test]
@@ -153,35 +169,11 @@ fn cli_validation_rejects_conflicting_flags() {
     assert!(!start.status.success());
     assert!(output_text(&start).contains("choose either --allow-other or --no-allow-other"));
 
-    let add = run(
-        &[
-            "add",
-            &fixture.target_arg(),
-            "docs",
-            "--workspace",
-            &fixture.workspace_arg(),
-            "--ro",
-            "--rw",
-        ],
-        &fixture.envs(),
-    );
-    assert!(!add.status.success());
-    assert!(output_text(&add).contains("choose either --ro or --rw"));
-
-    // The removed hard/soft revocation knob is no longer a flag; clap rejects it
-    // as an unexpected argument.
-    let rm = run(
-        &[
-            "rm",
-            "docs",
-            "--workspace",
-            &fixture.workspace_arg(),
-            "--hard",
-        ],
-        &fixture.envs(),
-    );
-    assert!(!rm.status.success());
-    assert!(output_text(&rm).contains("--hard"));
+    for removed in ["add", "rm", "freeze", "thaw"] {
+        let output = run(&[removed, "--help"], &fixture.envs());
+        assert!(!output.status.success());
+        assert!(output_text(&output).contains("unrecognized subcommand"));
+    }
 }
 
 #[test]
@@ -239,13 +231,7 @@ fn start_leaves_workspace_empty_before_entries_are_added() -> Result<(), Box<dyn
     );
 
     let stop = run(
-        &[
-            "stop",
-            "--workspace",
-            &fixture.workspace_arg(),
-            "--force",
-            "--lazy",
-        ],
+        &["stop", &fixture.workspace_arg(), "--force", "--lazy"],
         &fixture.envs(),
     );
     assert!(stop.status.success(), "{}", output_text(&stop));
@@ -281,13 +267,7 @@ fn control_plane_lifecycle_works_with_isolated_xdg_roots() -> Result<(), Box<dyn
         panic!("unexpected failure while probing FUSE mount support:\n{text}");
     }
     let stop_probe = run(
-        &[
-            "stop",
-            "--workspace",
-            &probe.workspace_arg(),
-            "--force",
-            "--lazy",
-        ],
+        &["stop", &probe.workspace_arg(), "--force", "--lazy"],
         &probe.envs(),
     );
     assert!(stop_probe.status.success(), "{}", output_text(&stop_probe));
@@ -300,20 +280,24 @@ fn control_plane_lifecycle_works_with_isolated_xdg_roots() -> Result<(), Box<dyn
     );
     assert!(start.status.success(), "{}", output_text(&start));
 
-    let add = run(
-        &[
-            "add",
-            &fixture.target_arg(),
-            "docs",
-            "--workspace",
-            &fixture.workspace_arg(),
-        ],
-        &fixture.envs(),
+    let add = edit_workspace_config(
+        &fixture,
+        &format!(
+            r#"version = 1
+readlink = true
+immutable_segments = []
+
+[entries.docs]
+target = "{}"
+mode = "rw"
+"#,
+            fixture.target_arg()
+        ),
     );
     assert!(add.status.success(), "{}", output_text(&add));
 
     let status = run(
-        &["status", "--workspace", &fixture.workspace_arg(), "--json"],
+        &["status", &fixture.workspace_arg(), "--json"],
         &fixture.envs(),
     );
     assert!(status.status.success(), "{}", output_text(&status));
@@ -334,16 +318,16 @@ fn control_plane_lifecycle_works_with_isolated_xdg_roots() -> Result<(), Box<dyn
             && line.trim_end().ends_with('1')
     }));
 
-    let rm = run(
-        &["rm", "docs", "--workspace", &fixture.workspace_arg()],
-        &fixture.envs(),
+    let rm = edit_workspace_config(
+        &fixture,
+        r#"version = 1
+readlink = true
+immutable_segments = []
+"#,
     );
     assert!(rm.status.success(), "{}", output_text(&rm));
 
-    let stopped = run(
-        &["stop", "--workspace", &fixture.workspace_arg()],
-        &fixture.envs(),
-    );
+    let stopped = run(&["stop", &fixture.workspace_arg()], &fixture.envs());
     assert!(stopped.status.success(), "{}", output_text(&stopped));
 
     let list_after_stop = run(&["list"], &fixture.envs());

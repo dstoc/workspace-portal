@@ -11,9 +11,7 @@ The intended workflow is:
 
 ```bash
 workspace-portal start ./workspace --bg
-workspace-portal add ~/code/project-a project-a
-workspace-portal add ~/notes/current notes --ro
-workspace-portal freeze vendor
+workspace-portal edit ./workspace
 workspace-portal status
 ```
 
@@ -51,31 +49,19 @@ Start a workspace in the background:
 workspace-portal start ./workspace --bg
 ```
 
-Add a writable entry:
+Edit entries, immutable segments, and symlink policy:
 
 ```bash
-workspace-portal add --workspace ./workspace ~/code/project-a project-a
+workspace-portal edit ./workspace
 ```
 
-Add a read-only entry:
-
-```bash
-workspace-portal add --workspace ./workspace --ro ~/notes/current notes
-```
-
-Freeze a segment name anywhere inside entries:
-
-```bash
-workspace-portal freeze --workspace ./workspace vendor
-```
-
-When you run commands from inside the workspace, `--workspace <path>` is
-optional because the CLI can discover the workspace automatically.
+When you run commands from inside the workspace, the workspace path is optional
+because the CLI can discover the workspace automatically.
 
 Check the workspace:
 
 ```bash
-workspace-portal status --workspace ./workspace
+workspace-portal status ./workspace
 ```
 
 Sample output:
@@ -110,7 +96,7 @@ WORKSPACE                              STATUS   ENTRIES
 Stop and unmount:
 
 ```bash
-workspace-portal stop --workspace ./workspace
+workspace-portal stop ./workspace
 ```
 
 ## CLI
@@ -135,62 +121,12 @@ Options:
 - `--adopt` uses an existing workspace directory
 - `--force` overrides stale state or mount conditions
 
-### `add`
-
-Add a host directory as a top-level entry:
-
-```bash
-workspace-portal add <target> <mount-point> [--workspace <path>] [--ro|--rw]
-```
-
-Options:
-
-- `--workspace <path>` skips workspace discovery
-- `--ro` adds a read-only entry
-- `--rw` adds a writable entry
-- `--replace` replaces an existing entry
-
-### `rm`
-
-Remove a top-level entry:
-
-```bash
-workspace-portal rm <mount-point> [--workspace <path>]
-```
-
-Removing an entry drops it from the namespace immediately; file handles that are
-already open continue to work until they are closed.
-
-### `freeze`
-
-Freeze a segment name workspace-wide:
-
-```bash
-workspace-portal freeze <segment> [--workspace <path>]
-```
-
-If `vendor` is frozen, any subtree rooted at a path component exactly named
-`vendor` becomes immutable through the mount. For example, `project-a/vendor`
-and `project-a/src/vendor` are frozen, while `vendors` and `vendor2` are not.
-
-Reads still work. Mutations through the mount fail with `EPERM`, including
-create, write, rename, unlink, `mkdir`, and metadata changes. Creating a new
-matching segment is also denied.
-
-### `thaw`
-
-Remove a workspace-wide immutable segment rule:
-
-```bash
-workspace-portal thaw <segment> [--workspace <path>]
-```
-
 ### `edit`
 
 Edit the whole entry set at once in your editor:
 
 ```bash
-workspace-portal edit [--workspace <path>]
+workspace-portal edit [<workspace>]
 ```
 
 Opens the current desired state in `$VISUAL`/`$EDITOR`/`vi` as a TOML buffer
@@ -218,7 +154,7 @@ is true.
 Show workspace status:
 
 ```bash
-workspace-portal status [--workspace <path>] [--json]
+workspace-portal status [<workspace>] [--json]
 ```
 
 Human output includes `READLINK` and `IMMUTABLE SEGMENTS` lines. JSON output
@@ -229,7 +165,7 @@ includes top-level `readlink` and `immutable_segments` fields.
 Stop the daemon and unmount the workspace:
 
 ```bash
-workspace-portal stop [--workspace <path>] [--lazy] [--force]
+workspace-portal stop [<workspace>] [--lazy] [--force]
 ```
 
 ### `list`
@@ -245,7 +181,15 @@ workspace-portal list
 Report FUSE and workspace prerequisites:
 
 ```bash
-workspace-portal check [--workspace <path>]
+workspace-portal check [<workspace>]
+```
+
+### `forget`
+
+Remove stored metadata for a stopped workspace:
+
+```bash
+workspace-portal forget <workspace>
 ```
 
 ## State and Paths

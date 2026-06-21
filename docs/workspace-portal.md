@@ -9,8 +9,7 @@ Typical workflow:
 
 ```bash
 workspace-portal start ./workspace --bg
-workspace-portal add ~/code/project-a project-a
-workspace-portal add ~/notes/current notes --ro
+workspace-portal edit ./workspace
 workspace-portal status
 cd workspace
 ls
@@ -34,13 +33,12 @@ The current codebase implements:
 
 - CLI commands:
   - `start`
-  - `add`
-  - `rm`
   - `edit`
   - `status`
   - `stop`
   - `list`
   - `check`
+  - `forget`
 - a long-running control daemon over a Unix domain socket
 - persisted workspace state
 - workspace discovery by walking upward and checking registry state
@@ -74,7 +72,7 @@ An entry is a top-level name inside the workspace mapped to one host target.
 Example:
 
 ```bash
-workspace-portal add ~/code/project-a project-a
+workspace-portal edit ./workspace
 ```
 
 This creates:
@@ -97,7 +95,7 @@ Current behavior:
 
 - the target must exist
 - the target must be a directory
-- the target is canonicalized on add
+- the target is canonicalized when the edited config is applied
 - the top-level entry name must be a single path component
 
 ## Command behavior
@@ -141,58 +139,10 @@ Notes:
 - workspace discovery and restart behavior now rely on persisted registry state,
   not a marker file inside the workspace
 
-### `add`
-
-```bash
-workspace-portal add <target> <mount-point> [--workspace <path>] [--ro|--rw]
-```
-
-Current behavior:
-
-- resolves `<target>` to a canonical absolute path
-- detects the workspace by walking upward unless `--workspace` is supplied
-- adds a top-level entry named `<mount-point>`
-- rejects names containing `/`, `..`, NUL, or path separators
-- defaults to read-write unless `--ro` or the workspace default says otherwise
-- supports `--replace` for existing entries
-
-Supported options:
-
-```text
---workspace <path>
---ro
---rw
---replace
---name <name>
-```
-
-Note:
-
-- `--name` is a deprecated alias for the positional `<mount-point>` argument
-- the target argument is always canonicalized (symlinks in the target path are
-  resolved when the entry is registered); there is no per-entry symlink policy
-
-### `rm`
-
-```bash
-workspace-portal rm <mount-point> [--workspace <path>]
-```
-
-Current behavior:
-
-- removes the top-level mapping from daemon state
-- new lookups for the entry fail immediately
-- existing open file handles are allowed to continue
-
-Notes:
-
-- this is soft-revocation behavior, and the only behavior: removing an entry
-  never forcibly tears down handles that are already open
-
 ### `edit`
 
 ```bash
-workspace-portal edit [--workspace <path>]
+workspace-portal edit [<workspace>]
 ```
 
 Current behavior:
@@ -213,7 +163,7 @@ Notes:
 ### `status`
 
 ```bash
-workspace-portal status [--workspace <path>] [--json]
+workspace-portal status [<workspace>] [--json]
 ```
 
 Current behavior:
@@ -244,7 +194,7 @@ JSON payload shape:
 ### `stop`
 
 ```bash
-workspace-portal stop [--workspace <path>] [--lazy] [--force]
+workspace-portal stop [<workspace>] [--lazy] [--force]
 ```
 
 Current behavior:
@@ -268,7 +218,7 @@ Current behavior:
 ### `check`
 
 ```bash
-workspace-portal check [--workspace <path>]
+workspace-portal check [<workspace>]
 ```
 
 Current behavior:
@@ -278,9 +228,23 @@ Current behavior:
 - reports workspace mount state when a workspace is supplied or discoverable
 - reports socket/state visibility
 
+### `forget`
+
+```bash
+workspace-portal forget <workspace>
+```
+
+Current behavior:
+
+- refuses to run while the workspace daemon is reachable or the workspace is
+  mounted
+- removes stored state, registry, stale socket, and log metadata for the
+  workspace
+- does not remove the workspace directory or any entry targets
+
 ## Workspace discovery
 
-Commands such as `add`, `rm`, `status`, and `stop` can discover the workspace by
+Commands such as `edit`, `status`, `stop`, and `check` can discover the workspace by
 walking upward from the current directory.
 
 Current algorithm:
@@ -296,7 +260,7 @@ Current algorithm:
 4. If the registry file exists and its stored `workspace` path matches the
    ancestor, use that workspace.
 5. Stop at filesystem root.
-6. If no workspace is found, require `--workspace`.
+6. If no workspace is found, require the positional `<workspace>` path.
 
 Current limitation:
 
@@ -406,8 +370,10 @@ Nested mount-point names are rejected.
 
 Example rejected shape:
 
-```bash
-workspace-portal add ~/foo vendor/foo
+```toml
+[entries."vendor/foo"]
+target = "/home/user/foo"
+mode = "rw"
 ```
 
 ### Path translation
@@ -490,7 +456,8 @@ development workflows:
 
 ### Revocation behavior
 
-`rm` uses soft revocation, and it is the only behavior:
+Removing an entry through `edit` uses soft revocation, and it is the only
+behavior:
 
 - new lookups fail immediately
 - removed entries disappear from the namespace
