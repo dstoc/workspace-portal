@@ -7,9 +7,10 @@ pub(crate) mod runtime;
 pub(crate) mod workspace;
 
 use std::{
+    collections::BTreeMap,
     env, fs,
     io::{BufRead, BufReader, Write},
-    os::unix::{fs::FileTypeExt, net::UnixStream},
+    os::unix::{fs::FileTypeExt, fs::MetadataExt, net::UnixStream},
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant},
@@ -19,7 +20,7 @@ use crate::{
     error::{Error, Result},
     paths,
     protocol::{self, ControlRequest, ControlResponse, StatusPayload},
-    state::{AccessMode, DaemonStatus},
+    state::{AccessMode, DaemonStatus, WorkspaceSnapshot},
 };
 
 use self::{
@@ -75,6 +76,11 @@ pub struct RemoveArgs {
 pub struct StatusArgs {
     pub workspace: Option<PathBuf>,
     pub json: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuditHardlinksArgs {
+    pub workspace: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -262,15 +268,7 @@ pub async fn freeze(args: FreezeArgs) -> Result<()> {
 
 pub async fn status(args: StatusArgs) -> Result<()> {
     let (ctx, live_state) = load_workspace_context(args.workspace)?;
-    let socket_live = socket_is_live(&ctx.socket)?;
-    let mut snapshot = if socket_live {
-        match send_request(&ctx.socket, &ControlRequest::Status)? {
-            ControlResponse::Status { workspace } => workspace,
-            other => return Err(response_unexpected(other)),
-        }
-    } else {
-        live_state.snapshot()
-    };
+    let (mut snapshot, socket_live) = load_workspace_snapshot(&ctx, &live_state)?;
 
     if !socket_live {
         snapshot.daemon = DaemonStatus::Stopped;
@@ -286,6 +284,23 @@ pub async fn status(args: StatusArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+pub async fn audit_hardlinks(args: AuditHardlinksArgs) -> Result<()> {
+    let (ctx, live_state) = load_workspace_context(Some(args.workspace))?;
+    let (snapshot, _) = load_workspace_snapshot(&ctx, &live_state)?;
+    let findings = scan_hardlink_audit(&snapshot)?;
+
+    if findings.is_empty() {
+        println!("no hardlink aliases crossing immutable boundaries found");
+        return Ok(());
+    }
+
+    print_hardlink_audit(&findings);
+    Err(Error::Cli(format!(
+        "hardlink audit found {} crossing inode group(s)",
+        findings.len()
+    )))
 }
 
 pub async fn stop(args: StopArgs) -> Result<()> {
@@ -630,6 +645,194 @@ fn ensure_response_ok(response: ControlResponse) -> Result<()> {
 
 fn response_unexpected(response: ControlResponse) -> Error {
     Error::Protocol(format!("unexpected control response: {response:?}"))
+}
+
+fn load_workspace_snapshot(
+    ctx: &WorkspaceContext,
+    fallback_state: &crate::state::PortalState,
+) -> Result<(WorkspaceSnapshot, bool)> {
+    let socket_live = socket_is_live(&ctx.socket)?;
+    let snapshot = if socket_live {
+        match send_request(&ctx.socket, &ControlRequest::Status)? {
+            ControlResponse::Status { workspace } => workspace,
+            other => return Err(response_unexpected(other)),
+        }
+    } else {
+        let mut snapshot = fallback_state.snapshot();
+        snapshot.daemon = DaemonStatus::Stopped;
+        snapshot
+    };
+
+    Ok((snapshot, socket_live))
+}
+
+#[derive(Debug, Clone)]
+struct HardlinkAlias {
+    entry: String,
+    relative: PathBuf,
+    immutable: bool,
+}
+
+#[derive(Debug, Clone)]
+struct HardlinkGroup {
+    dev: u64,
+    ino: u64,
+    nlink: u64,
+    aliases: Vec<HardlinkAlias>,
+}
+
+fn scan_hardlink_audit(snapshot: &WorkspaceSnapshot) -> Result<Vec<HardlinkGroup>> {
+    let mut groups: BTreeMap<(u64, u64), HardlinkGroup> = BTreeMap::new();
+
+    for entry in &snapshot.entries {
+        scan_entry_target(snapshot, entry, &mut groups)?;
+    }
+
+    let mut findings = Vec::new();
+    for (_, mut group) in groups {
+        group.aliases.sort_by(|left, right| {
+            left.entry
+                .cmp(&right.entry)
+                .then_with(|| left.relative.cmp(&right.relative))
+        });
+
+        let has_immutable = group.aliases.iter().any(|alias| alias.immutable);
+        let has_mutable = group.aliases.iter().any(|alias| !alias.immutable);
+        if has_immutable && has_mutable {
+            findings.push(group);
+        }
+    }
+
+    findings.sort_by_key(|group| (group.dev, group.ino));
+    Ok(findings)
+}
+
+fn scan_entry_target(
+    snapshot: &WorkspaceSnapshot,
+    entry: &crate::state::EntryRecord,
+    groups: &mut BTreeMap<(u64, u64), HardlinkGroup>,
+) -> Result<()> {
+    scan_path(snapshot, &entry.name, &entry.target, &entry.target, groups).map_err(|err| {
+        Error::Cli(format!(
+            "hardlink audit failed under {}: {err}",
+            entry.target.display()
+        ))
+    })
+}
+
+fn scan_path(
+    snapshot: &WorkspaceSnapshot,
+    entry_name: &str,
+    target_root: &Path,
+    path: &Path,
+    groups: &mut BTreeMap<(u64, u64), HardlinkGroup>,
+) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_dir() {
+        for child in fs::read_dir(path)? {
+            let child = child?;
+            scan_path(snapshot, entry_name, target_root, &child.path(), groups)?;
+        }
+        return Ok(());
+    }
+
+    let nlink = metadata.nlink();
+    if nlink <= 1 {
+        return Ok(());
+    }
+
+    let relative = entry_relative_path(target_root, path)?;
+    let immutable = relative_contains_immutable_segment(&snapshot.immutable_segments, &relative);
+    let key = (metadata.dev(), metadata.ino());
+    let group = groups.entry(key).or_insert_with(|| HardlinkGroup {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+        nlink,
+        aliases: Vec::new(),
+    });
+    group.nlink = group.nlink.max(nlink);
+    group.aliases.push(HardlinkAlias {
+        entry: entry_name.to_owned(),
+        relative,
+        immutable,
+    });
+
+    Ok(())
+}
+
+fn entry_relative_path(target_root: &Path, path: &Path) -> Result<PathBuf> {
+    if path == target_root {
+        return Ok(PathBuf::new());
+    }
+
+    path.strip_prefix(target_root)
+        .map(PathBuf::from)
+        .map_err(|_| {
+            Error::Cli(format!(
+                "failed to derive entry-relative path for {} under {}",
+                path.display(),
+                target_root.display()
+            ))
+        })
+}
+
+fn relative_contains_immutable_segment(immutable_segments: &[String], relative: &Path) -> bool {
+    use std::path::Component;
+
+    relative.components().any(|component| match component {
+        Component::Normal(segment) => segment
+            .to_str()
+            .map(|segment| {
+                immutable_segments
+                    .iter()
+                    .any(|candidate| candidate == segment)
+            })
+            .unwrap_or(false),
+        _ => false,
+    })
+}
+
+fn print_hardlink_audit(findings: &[HardlinkGroup]) {
+    println!("hardlink aliases crossing immutable boundaries:");
+    println!();
+
+    for (index, group) in findings.iter().enumerate() {
+        if index > 0 {
+            println!();
+        }
+
+        let visible = group.aliases.len() as u64;
+        print!(
+            "inode dev={} ino={} nlink={}",
+            group.dev, group.ino, group.nlink
+        );
+        if group.nlink > visible {
+            print!(" visible={} unseen={}", visible, group.nlink - visible);
+        } else {
+            print!(" visible={}", visible);
+        }
+        println!();
+
+        println!("  immutable:");
+        let mut printed = false;
+        for alias in group.aliases.iter().filter(|alias| alias.immutable) {
+            println!("    {}:{}", alias.entry, alias.relative.display());
+            printed = true;
+        }
+        if !printed {
+            println!("    <none>");
+        }
+
+        println!("  mutable:");
+        let mut printed = false;
+        for alias in group.aliases.iter().filter(|alias| !alias.immutable) {
+            println!("    {}:{}", alias.entry, alias.relative.display());
+            printed = true;
+        }
+        if !printed {
+            println!("    <none>");
+        }
+    }
 }
 
 fn remove_file_if_exists(path: &Path) -> Result<()> {
