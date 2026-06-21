@@ -3,10 +3,7 @@ use std::{env, path::PathBuf};
 use clap::{Parser, Subcommand};
 
 use crate::{
-    daemon::{
-        self, AddArgs, CheckArgs, EditArgs, FreezeArgs, ListArgs, RemoveArgs, StartArgs,
-        StatusArgs, StopArgs, ThawArgs,
-    },
+    daemon::{self, CheckArgs, EditArgs, ListArgs, StartArgs, StatusArgs, StopArgs},
     error::{Error, Result},
 };
 
@@ -24,12 +21,8 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Commands {
     Start(StartCommand),
-    Add(AddCommand),
-    Freeze(FreezeCommand),
-    Rm(RmCommand),
     Status(StatusCommand),
     Stop(StopCommand),
-    Thaw(ThawCommand),
     List,
     Check(CheckCommand),
     Edit(EditCommand),
@@ -85,56 +78,6 @@ pub struct StartCommand {
 }
 
 #[derive(Debug, Parser)]
-pub struct AddCommand {
-    /// Host directory to expose in the workspace.
-    pub target: PathBuf,
-    /// Top-level workspace entry name to create.
-    pub mount_point: String,
-
-    #[arg(
-        long,
-        help = "Override workspace discovery with an explicit workspace path"
-    )]
-    pub workspace: Option<PathBuf>,
-
-    #[arg(long, help = "Add the entry as read-only")]
-    pub ro: bool,
-
-    #[arg(long, help = "Add the entry as read-write")]
-    pub rw: bool,
-
-    #[arg(long, help = "Replace an existing entry with the same name")]
-    pub replace: bool,
-
-    #[arg(long, help = "Deprecated alias for the mount-point name")]
-    pub name: Option<String>,
-}
-
-#[derive(Debug, Parser)]
-pub struct RmCommand {
-    /// Top-level workspace entry name to remove.
-    pub mount_point: String,
-
-    #[arg(
-        long,
-        help = "Override workspace discovery with an explicit workspace path"
-    )]
-    pub workspace: Option<PathBuf>,
-}
-
-#[derive(Debug, Parser)]
-pub struct FreezeCommand {
-    /// Immutable path segment name to freeze workspace-wide.
-    pub segment: String,
-
-    #[arg(
-        long,
-        help = "Override workspace discovery with an explicit workspace path"
-    )]
-    pub workspace: Option<PathBuf>,
-}
-
-#[derive(Debug, Parser)]
 pub struct StatusCommand {
     #[arg(
         long,
@@ -162,18 +105,6 @@ pub struct StopCommand {
 
     #[arg(long, help = "Override stale state or existing mount conditions")]
     pub force: bool,
-}
-
-#[derive(Debug, Parser)]
-pub struct ThawCommand {
-    /// Immutable path segment name to unfreeze workspace-wide.
-    pub segment: String,
-
-    #[arg(
-        long,
-        help = "Override workspace discovery with an explicit workspace path"
-    )]
-    pub workspace: Option<PathBuf>,
 }
 
 #[derive(Debug, Parser)]
@@ -220,34 +151,6 @@ pub async fn run() -> Result<()> {
             })
             .await
         }
-        Commands::Add(cmd) => {
-            validate_add(&cmd)?;
-            let mount_point = cmd.name.unwrap_or(cmd.mount_point);
-            daemon::add(AddArgs {
-                workspace: cmd.workspace,
-                target: cmd.target,
-                mount_point,
-                read_only: cmd.ro,
-                read_write: cmd.rw,
-                replace: cmd.replace,
-            })
-            .await
-        }
-        Commands::Freeze(cmd) => {
-            validate_freeze(&cmd)?;
-            daemon::freeze(FreezeArgs {
-                workspace: cmd.workspace,
-                segment: cmd.segment,
-            })
-            .await
-        }
-        Commands::Rm(cmd) => {
-            daemon::remove(RemoveArgs {
-                workspace: cmd.workspace,
-                mount_point: cmd.mount_point,
-            })
-            .await
-        }
         Commands::Status(cmd) => {
             daemon::status(StatusArgs {
                 workspace: cmd.workspace,
@@ -260,14 +163,6 @@ pub async fn run() -> Result<()> {
                 workspace: cmd.workspace,
                 lazy: cmd.lazy,
                 force: cmd.force,
-            })
-            .await
-        }
-        Commands::Thaw(cmd) => {
-            validate_thaw(&cmd)?;
-            daemon::thaw(ThawArgs {
-                workspace: cmd.workspace,
-                segment: cmd.segment,
             })
             .await
         }
@@ -295,22 +190,6 @@ fn validate_start(cmd: &StartCommand) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn validate_add(cmd: &AddCommand) -> Result<()> {
-    if cmd.ro && cmd.rw {
-        return Err(Error::Cli("choose either --ro or --rw".to_owned()));
-    }
-
-    Ok(())
-}
-
-fn validate_freeze(cmd: &FreezeCommand) -> Result<()> {
-    crate::paths::validate_immutable_segment_name(&cmd.segment)
-}
-
-fn validate_thaw(cmd: &ThawCommand) -> Result<()> {
-    crate::paths::validate_immutable_segment_name(&cmd.segment)
 }
 
 fn init_tracing(log_level: Option<&str>) {
