@@ -124,6 +124,28 @@ for read-only entries and for a read-only-default workspace
 (`ensure_writable_entry`, `read_only_default`). This is enforced by the daemon
 regardless of the file's own mode bits.
 
+### 5. Immutable segments are path-policy protection
+
+Workspace state may declare immutable segment names such as `.git` or `.jj`.
+When a mutating operation targets an entry-relative path containing one of those
+segments, the daemon rejects it with `EPERM`. This is enforced by
+`ensure_mutable_relative_path` and applies to fresh writable opens, create,
+mkdir, symlink, unlink, rmdir, rename, truncate, metadata mutation, the write
+side of copy operations, and hard-link endpoints.
+
+Hard links are deliberately allowed for compatibility with build tools, but only
+within a single read-write entry and only when both endpoint paths are mutable.
+For example, linking `target/a.o` to `target/a.copy.o` is allowed, while linking
+`.git/config` to `target/config-alias` or linking `target/config` to
+`.git/config-alias` is rejected.
+
+This is a **path-policy** guarantee, not a full inode-integrity guarantee. If a
+backing inode already has aliases under both immutable and mutable paths, writes
+through the mutable alias can still affect the immutable path's contents. The
+runtime does not scan for or block those aliases on every write; use
+`workspace-portal audit hardlinks <workspace>` to find visible hard-link groups
+that cross immutable and mutable portal paths.
+
 ## Control-plane authorization
 
 The entry set — *what is exposed* — is the other asset. The control socket is
@@ -142,6 +164,7 @@ is exposed is an owner-only operation.
 | Race the backing store: swap an in-entry component to a symlink that escapes, then drive a cached inode | Daemon resolution is `RESOLVE_BENEATH` → `EXDEV`; no out-of-entry host data served |
 | `/proc`-style magic-link traversal during daemon resolution | Blocked by `RESOLVE_NO_MAGICLINKS` |
 | Write to a read-only entry | Rejected (`EROFS`/`EPERM`) |
+| Hard-link from `.git`/`.jj` or another immutable segment to a mutable path, or into an immutable segment | Rejected (`EPERM`) when either endpoint path contains an immutable segment |
 | Alter the exposed entry set from inside the container | Control socket is `0600`/owner-only; unreachable |
 | Old kernel without `openat2` | Fail-closed: operations error rather than resolve unconfined |
 
@@ -180,6 +203,13 @@ These are deliberate. Stating them is part of the design.
 - **Unbounded daemon-side growth (local DoS).** The inode cache and open-handle
   maps grow with lookups/opens and shrink only on `forget`/`release`; a consumer
   issuing many lookups can grow daemon memory. Not a containment breach.
+- **Pre-existing hard-link aliases across immutable boundaries.** Immutable
+  segments are enforced by endpoint path, not by global inode ownership. A hard
+  link created outside the portal, or created before a segment became immutable,
+  can make the same inode visible under both an immutable path and a mutable
+  path. Normal writes through the mutable path are not runtime-blocked. Run
+  `workspace-portal audit hardlinks <workspace>` to detect visible aliases of
+  this kind.
 - **Environmental dependencies.** `chmod`/`utimens` confinement uses
   `/proc/self/fd` on a pinned `O_PATH` fd (safe, but requires `/proc` mounted in
   the daemon's namespace); confinement requires Linux ≥ 5.6 for `openat2` and is
@@ -212,6 +242,11 @@ The containment invariant is checked at two levels:
   escaping symlink, and asserts the daemon never serves metadata for a path
   outside the entry; the broader FUSE suite covers normal and in-entry-symlink
   behavior.
+- **Hard-link policy:** `fuse_e2e_hard_link_rejects_immutable_source_and_destination`
+  checks that hard-link creation fails when either endpoint path is under an
+  immutable segment. `audit_hardlinks_reports_crossing_immutable_and_mutable_aliases`
+  checks that the CLI reports visible pre-existing aliases that cross immutable
+  and mutable paths.
 
 Run the full FUSE suite on a FUSE-capable host:
 
