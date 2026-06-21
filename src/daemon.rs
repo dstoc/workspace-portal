@@ -103,6 +103,11 @@ pub struct EditArgs {
     pub workspace: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ForgetArgs {
+    pub workspace: PathBuf,
+}
+
 pub async fn start(args: StartArgs) -> Result<()> {
     let workspace = paths::canonical_workspace_path(&args.workspace)?;
     let workspace_ctx = WorkspaceContext::from_workspace(
@@ -413,6 +418,24 @@ pub async fn list(_args: ListArgs) -> Result<()> {
     Ok(())
 }
 
+pub async fn forget(args: ForgetArgs) -> Result<()> {
+    let (ctx, _) = load_workspace_context(Some(args.workspace))?;
+    let socket_live = socket_is_live(&ctx.socket)?;
+    let mounted = workspace_is_mounted(&ctx.workspace).unwrap_or(false);
+    if socket_live || mounted {
+        return Err(Error::DaemonAlreadyRunning(ctx.workspace));
+    }
+
+    remove_file_if_exists(&ctx.state_path)?;
+    if ctx.registry_path != ctx.state_path {
+        remove_file_if_exists(&ctx.registry_path)?;
+    }
+    remove_file_if_exists(&ctx.socket)?;
+    remove_file_if_exists(&paths::log_file_path(&ctx.workspace_id))?;
+
+    Ok(())
+}
+
 pub async fn check(args: CheckArgs) -> Result<()> {
     let candidate = match args.workspace {
         Some(workspace) => paths::canonical_workspace_path(workspace)?,
@@ -607,4 +630,12 @@ fn ensure_response_ok(response: ControlResponse) -> Result<()> {
 
 fn response_unexpected(response: ControlResponse) -> Error {
     Error::Protocol(format!("unexpected control response: {response:?}"))
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(Error::Io(err)),
+    }
 }

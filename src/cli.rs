@@ -3,7 +3,7 @@ use std::{env, path::PathBuf};
 use clap::{Parser, Subcommand};
 
 use crate::{
-    daemon::{self, CheckArgs, EditArgs, ListArgs, StartArgs, StatusArgs, StopArgs},
+    daemon::{self, CheckArgs, EditArgs, ForgetArgs, ListArgs, StartArgs, StatusArgs, StopArgs},
     error::{Error, Result},
 };
 
@@ -26,6 +26,7 @@ pub enum Commands {
     List,
     Check(CheckCommand),
     Edit(EditCommand),
+    Forget(ForgetCommand),
 }
 
 #[derive(Debug, Parser)]
@@ -125,6 +126,12 @@ pub struct EditCommand {
     pub workspace: Option<PathBuf>,
 }
 
+#[derive(Debug, Parser)]
+pub struct ForgetCommand {
+    /// Workspace whose stored metadata should be removed.
+    pub workspace: PathBuf,
+}
+
 pub async fn run() -> Result<()> {
     let cli = Cli::parse();
     let log_level = match &cli.command {
@@ -175,6 +182,12 @@ pub async fn run() -> Result<()> {
         }
         Commands::Edit(cmd) => {
             daemon::edit(EditArgs {
+                workspace: cmd.workspace,
+            })
+            .await
+        }
+        Commands::Forget(cmd) => {
+            daemon::forget(ForgetArgs {
                 workspace: cmd.workspace,
             })
             .await
