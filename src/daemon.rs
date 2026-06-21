@@ -84,6 +84,11 @@ pub struct AuditHardlinksArgs {
 }
 
 #[derive(Debug, Clone)]
+pub struct AuditSymlinksArgs {
+    pub workspace: PathBuf,
+}
+
+#[derive(Debug, Clone)]
 pub struct StopArgs {
     pub workspace: Option<PathBuf>,
     pub lazy: bool,
@@ -299,6 +304,23 @@ pub async fn audit_hardlinks(args: AuditHardlinksArgs) -> Result<()> {
     print_hardlink_audit(&findings);
     Err(Error::Cli(format!(
         "hardlink audit found {} crossing inode group(s)",
+        findings.len()
+    )))
+}
+
+pub async fn audit_symlinks(args: AuditSymlinksArgs) -> Result<()> {
+    let (ctx, live_state) = load_workspace_context(Some(args.workspace))?;
+    let (snapshot, _) = load_workspace_snapshot(&ctx, &live_state)?;
+    let findings = scan_symlink_audit(&snapshot)?;
+
+    if findings.is_empty() {
+        println!("no symlinks resolving outside entry targets found");
+        return Ok(());
+    }
+
+    print_symlink_audit(&findings);
+    Err(Error::Cli(format!(
+        "symlink audit found {} escaping symlink target(s)",
         findings.len()
     )))
 }
@@ -720,6 +742,73 @@ fn scan_entry_target(
     })
 }
 
+#[derive(Debug, Clone)]
+struct SymlinkFinding {
+    entry: String,
+    relative: PathBuf,
+    target: PathBuf,
+}
+
+fn scan_symlink_audit(snapshot: &WorkspaceSnapshot) -> Result<Vec<SymlinkFinding>> {
+    let mut findings = Vec::new();
+
+    for entry in &snapshot.entries {
+        scan_symlink_entry(entry, &mut findings)?;
+    }
+
+    findings.sort_by(|left, right| {
+        left.entry
+            .cmp(&right.entry)
+            .then_with(|| left.relative.cmp(&right.relative))
+    });
+
+    Ok(findings)
+}
+
+fn scan_symlink_entry(
+    entry: &crate::state::EntryRecord,
+    findings: &mut Vec<SymlinkFinding>,
+) -> Result<()> {
+    scan_symlink_path(&entry.name, &entry.target, &entry.target, findings).map_err(|err| {
+        Error::Cli(format!(
+            "symlink audit failed under {}: {err}",
+            entry.target.display()
+        ))
+    })
+}
+
+fn scan_symlink_path(
+    entry_name: &str,
+    target_root: &Path,
+    path: &Path,
+    findings: &mut Vec<SymlinkFinding>,
+) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_dir() {
+        for child in fs::read_dir(path)? {
+            let child = child?;
+            scan_symlink_path(entry_name, target_root, &child.path(), findings)?;
+        }
+        return Ok(());
+    }
+
+    if !metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+
+    let relative = entry_relative_path(target_root, path)?;
+    let target = fs::read_link(path)?;
+    if symlink_target_escapes_entry(&relative, &target) {
+        findings.push(SymlinkFinding {
+            entry: entry_name.to_owned(),
+            relative,
+            target,
+        });
+    }
+
+    Ok(())
+}
+
 fn scan_path(
     snapshot: &WorkspaceSnapshot,
     entry_name: &str,
@@ -792,6 +881,33 @@ fn relative_contains_immutable_segment(immutable_segments: &[String], relative: 
     })
 }
 
+fn symlink_target_escapes_entry(link_relative: &Path, target: &Path) -> bool {
+    use std::path::Component;
+
+    if target.is_absolute() {
+        return true;
+    }
+
+    let mut depth = link_relative
+        .parent()
+        .map_or(0, |parent| parent.components().count());
+    for component in target.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(_) => depth = depth.saturating_add(1),
+            Component::ParentDir => {
+                if depth == 0 {
+                    return true;
+                }
+                depth -= 1;
+            }
+            Component::RootDir | Component::Prefix(_) => return true,
+        }
+    }
+
+    false
+}
+
 fn print_hardlink_audit(findings: &[HardlinkGroup]) {
     println!("hardlink aliases crossing immutable boundaries:");
     println!();
@@ -832,6 +948,20 @@ fn print_hardlink_audit(findings: &[HardlinkGroup]) {
         if !printed {
             println!("    <none>");
         }
+    }
+}
+
+fn print_symlink_audit(findings: &[SymlinkFinding]) {
+    println!("symlinks resolving outside entry targets:");
+    println!();
+
+    for finding in findings {
+        println!(
+            "{}:{} -> {}",
+            finding.entry,
+            finding.relative.display(),
+            finding.target.display()
+        );
     }
 }
 
