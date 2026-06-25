@@ -1,10 +1,13 @@
 use std::{
+    ffi::OsStr,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
+    thread,
     time::Duration,
 };
 
-use fuser::{Config as FuserConfig, INodeNo, MountOption, SessionACL};
+use fuser::{Config as FuserConfig, INodeNo, MountOption, Notifier, Session, SessionACL};
+use tracing::warn;
 
 use crate::{
     error::Result,
@@ -23,9 +26,9 @@ pub use path::{PortalPath, RenamePlan, ResolvedPortalPath, parse_portal_path};
 pub use resolve::{resolve_read_path, resolve_write_path, validate_rename};
 
 pub(crate) const ROOT_INO: INodeNo = INodeNo::ROOT;
-// Use zero TTLs until we implement explicit invalidation on namespace changes.
-// This avoids stale positive and negative dentries surviving successful renames.
-pub(crate) const TTL: Duration = Duration::from_secs(0);
+// fuser entry replies use one TTL for both entry and returned-attribute validity.
+pub(crate) const ENTRY_TTL: Duration = Duration::from_secs(1);
+pub(crate) const ATTR_TTL: Duration = Duration::from_secs(0);
 
 #[derive(Debug, Clone)]
 pub struct FsConfig {
@@ -38,6 +41,7 @@ pub struct PortalFs {
     pub config: FsConfig,
     pub state: Arc<RwLock<PortalState>>,
     runtime: Mutex<runtime::FuseRuntime>,
+    notifier: Arc<Mutex<Option<Notifier>>>,
 }
 
 pub(crate) fn build_mount_config(allow_other: bool, nosymfollow: bool) -> FuserConfig {
@@ -71,6 +75,7 @@ impl PortalFs {
             config,
             state,
             runtime: Mutex::new(runtime::FuseRuntime::new()),
+            notifier: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -139,6 +144,50 @@ impl PortalFs {
         resolve::ensure_writable_entry(entry)
     }
 
+    pub(crate) fn invalidate_entry(&self, parent: INodeNo, name: &OsStr) {
+        let notifier = match self.notifier.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => {
+                warn!("fuse notifier mutex poisoned; attempting entry invalidation anyway");
+                poisoned.into_inner().clone()
+            }
+        };
+
+        let Some(notifier) = notifier else {
+            warn!(
+                parent = parent.0,
+                name = ?name,
+                "missing fuse notifier; skipped entry cache invalidation"
+            );
+            return;
+        };
+
+        let name = name.to_os_string();
+        let log_name = name.clone();
+        // Kernel invalidation can block if sent from the FUSE request thread
+        // before that request's reply is processed, so send it out of band.
+        if let Err(error) = thread::Builder::new()
+            .name("workspace-portal-inval-entry".to_owned())
+            .spawn(move || {
+                if let Err(error) = notifier.inval_entry(parent, &name) {
+                    warn!(
+                        parent = parent.0,
+                        name = ?name,
+                        error = %error,
+                        "failed to invalidate fuse entry cache"
+                    );
+                }
+            })
+        {
+            warn!(
+                parent = parent.0,
+                name = ?log_name,
+                error = %error,
+                "failed to spawn fuse entry cache invalidation"
+            );
+        }
+    }
+
     pub fn mount(
         self,
         mountpoint: &Path,
@@ -146,7 +195,17 @@ impl PortalFs {
         nosymfollow: bool,
     ) -> Result<fuser::BackgroundSession> {
         let config = build_mount_config(allow_other, nosymfollow);
-        Ok(fuser::spawn_mount2(self, mountpoint, &config)?)
+        let notifier = Arc::clone(&self.notifier);
+        let session = Session::new(self, mountpoint, &config)?;
+        *notifier.lock().unwrap() = Some(session.notifier());
+
+        match session.spawn() {
+            Ok(background) => Ok(background),
+            Err(error) => {
+                *notifier.lock().unwrap() = None;
+                Err(error.into())
+            }
+        }
     }
 }
 
@@ -174,5 +233,11 @@ mod tests {
                 .mount_options
                 .contains(&MountOption::CUSTOM("nosymfollow".to_owned()))
         );
+    }
+
+    #[test]
+    fn ttl_constants_match_final_cache_policy() {
+        assert_eq!(ENTRY_TTL, Duration::from_secs(1));
+        assert_eq!(ATTR_TTL, Duration::from_secs(0));
     }
 }

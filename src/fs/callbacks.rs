@@ -22,7 +22,7 @@ use crate::{
 use tracing::debug;
 
 use super::{
-    PortalFs, ROOT_INO, TTL,
+    ATTR_TTL, ENTRY_TTL, PortalFs, ROOT_INO,
     attr::{attr_from_metadata, current_attr, directory_attr, file_attr, root_attr},
     path::{PortalPath, child_portal_path, portal_path_to_pathbuf},
     resolve::{
@@ -272,7 +272,7 @@ impl Filesystem for PortalFs {
                 "lookup parent={} name={} -> ino={} ok",
                 parent.0, name, ino.0
             );
-            reply.entry(&TTL, &attr, Generation(entry.generation));
+            reply.entry(&ENTRY_TTL, &attr, Generation(entry.generation));
             return;
         }
 
@@ -333,7 +333,7 @@ impl Filesystem for PortalFs {
             "lookup parent={} name={:?} child_path={:?} -> ino={} ok",
             parent.0, name, child_path, ino.0
         );
-        reply.entry(&TTL, &attr, Generation(resolved.entry.generation));
+        reply.entry(&ENTRY_TTL, &attr, Generation(resolved.entry.generation));
     }
 
     fn forget(&self, _req: &Request, ino: INodeNo, nlookup: u64) {
@@ -348,7 +348,7 @@ impl Filesystem for PortalFs {
             match root_attr(&state) {
                 Ok(attr) => {
                     debug!("getattr ino={} -> ok (root)", ino.0);
-                    reply.attr(&TTL, &attr)
+                    reply.attr(&ATTR_TTL, &attr)
                 }
                 Err(err) => {
                     debug!("getattr ino={} -> EIO err={}", ino.0, err);
@@ -369,7 +369,7 @@ impl Filesystem for PortalFs {
         {
             Ok(attr) => {
                 debug!("getattr ino={} path={:?} -> ok", ino.0, path);
-                reply.attr(&TTL, &attr)
+                reply.attr(&ATTR_TTL, &attr)
             }
             Err(err) => {
                 // For soft revocation: the entry was removed but an open fd remains.
@@ -383,7 +383,7 @@ impl Filesystem for PortalFs {
                         "getattr ino={} path={:?} -> ok (revoked, fstat fallback)",
                         ino.0, path
                     );
-                    reply.attr(&TTL, &attr);
+                    reply.attr(&ATTR_TTL, &attr);
                     return;
                 }
                 debug!(
@@ -722,7 +722,7 @@ impl Filesystem for PortalFs {
         }
 
         match current_attr(&mut runtime, &state, &path) {
-            Ok(attr) => reply.attr(&TTL, &attr),
+            Ok(attr) => reply.attr(&ATTR_TTL, &attr),
             Err(err) => {
                 debug!(
                     operation = "setattr",
@@ -974,8 +974,9 @@ impl Filesystem for PortalFs {
                     entry_is_read_only(&resolved.entry, state.read_only_default),
                     0,
                 );
+                self.invalidate_entry(parent, &name);
                 reply.created(
-                    &TTL,
+                    &ENTRY_TTL,
                     &attr,
                     Generation(resolved.entry.generation),
                     fh,
@@ -1123,7 +1124,8 @@ impl Filesystem for PortalFs {
                     entry_is_read_only(&resolved.entry, state.read_only_default),
                     0,
                 );
-                reply.entry(&TTL, &attr, Generation(resolved.entry.generation));
+                self.invalidate_entry(parent, &name);
+                reply.entry(&ENTRY_TTL, &attr, Generation(resolved.entry.generation));
                 debug!(
                     operation = "mkdir",
                     parent = parent.0,
@@ -1197,7 +1199,8 @@ impl Filesystem for PortalFs {
                     entry_is_read_only(&resolved.entry, state.read_only_default),
                     0,
                 );
-                reply.entry(&TTL, &attr, Generation(resolved.entry.generation));
+                self.invalidate_entry(parent, &name);
+                reply.entry(&ENTRY_TTL, &attr, Generation(resolved.entry.generation));
             }
             Err(err) => reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO))),
         }
@@ -1223,7 +1226,10 @@ impl Filesystem for PortalFs {
         match safe_open::lstat(&resolved.entry.target, &resolved.relative) {
             Ok(metadata) if metadata.file_type().is_dir() => reply.error(Errno::EISDIR),
             Ok(_) => match safe_open::unlink(&resolved.entry.target, &resolved.relative) {
-                Ok(()) => reply.ok(),
+                Ok(()) => {
+                    self.invalidate_entry(parent, &name);
+                    reply.ok()
+                }
                 Err(err) => reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO))),
             },
             Err(_) => reply.error(Errno::ENOENT),
@@ -1248,7 +1254,10 @@ impl Filesystem for PortalFs {
         };
 
         match safe_open::rmdir(&resolved.entry.target, &resolved.relative) {
-            Ok(()) => reply.ok(),
+            Ok(()) => {
+                self.invalidate_entry(parent, &name);
+                reply.ok()
+            }
             Err(err) => reply.error(Errno::from_i32(err.raw_os_error().unwrap_or(libc::EIO))),
         }
     }
@@ -1313,6 +1322,8 @@ impl Filesystem for PortalFs {
             ) {
                 Ok(()) => {
                     runtime.rename_cached_subtree(&source_path, &target_path);
+                    self.invalidate_entry(parent, &source_name);
+                    self.invalidate_entry(newparent, &target_name);
                     debug!(
                         "rename parent={} name={:?} newparent={} newname={:?} source={} target={} -> ok",
                         parent.0,
@@ -1508,6 +1519,7 @@ impl Filesystem for PortalFs {
                         entry_is_read_only(&destination_resolved.entry, state.read_only_default),
                         0,
                     );
+                    self.invalidate_entry(newparent, &name);
                     debug!(
                         "link ino={} newparent={} newname={:?} source={} destination={} -> ino={} ok",
                         ino.0,
@@ -1518,7 +1530,7 @@ impl Filesystem for PortalFs {
                         destination_ino.0
                     );
                     reply.entry(
-                        &TTL,
+                        &ENTRY_TTL,
                         &attr,
                         Generation(destination_resolved.entry.generation),
                     );

@@ -368,6 +368,64 @@ fn fuse_e2e_happy_path_covers_mount_read_write_remove_and_unmount() -> Result<()
 
 #[test]
 #[ignore]
+fn fuse_e2e_root_negative_entry_is_invalidated_after_add() -> Result<(), Box<dyn Error>> {
+    require_fuse_prerequisites();
+
+    let fixture = Fixture::new();
+    fs::write(fixture.docs_target.join("readme.txt"), "root-negative")?;
+
+    start_workspace(&fixture);
+
+    let docs = fixture.workspace.join("docs");
+    let missing = fs::metadata(&docs).unwrap_err();
+    assert_eq!(missing.kind(), ErrorKind::NotFound);
+
+    set_workspace_entries(&fixture, &[("docs", fixture.docs_target.as_path(), "rw")]);
+
+    assert!(fs::metadata(&docs)?.is_dir());
+    assert_eq!(
+        fs::read_to_string(fixture.workspace.join("docs/readme.txt"))?,
+        "root-negative"
+    );
+
+    let stop = run(&["stop", &fixture.workspace_arg()], &fixture.envs());
+    assert!(stop.status.success(), "{}", output_text(&stop));
+    wait_for_mounted_state(&fixture, false);
+
+    Ok(())
+}
+
+#[test]
+#[ignore]
+fn fuse_e2e_root_positive_entry_is_invalidated_after_remove() -> Result<(), Box<dyn Error>> {
+    require_fuse_prerequisites();
+
+    let fixture = Fixture::new();
+    fs::write(fixture.docs_target.join("readme.txt"), "root-positive")?;
+
+    start_rw_workspace(&fixture);
+
+    let docs = fixture.workspace.join("docs");
+    assert!(fs::metadata(&docs)?.is_dir());
+    assert_eq!(
+        fs::read_to_string(fixture.workspace.join("docs/readme.txt"))?,
+        "root-positive"
+    );
+
+    set_workspace_entries(&fixture, &[]);
+
+    let removed = fs::metadata(&docs).unwrap_err();
+    assert_eq!(removed.kind(), ErrorKind::NotFound);
+
+    let stop = run(&["stop", &fixture.workspace_arg()], &fixture.envs());
+    assert!(stop.status.success(), "{}", output_text(&stop));
+    wait_for_mounted_state(&fixture, false);
+
+    Ok(())
+}
+
+#[test]
+#[ignore]
 #[cfg(unix)]
 fn fuse_e2e_symlinks_cover_traversal_and_broken_targets() -> Result<(), Box<dyn Error>> {
     require_fuse_prerequisites();
@@ -1607,13 +1665,15 @@ fn fuse_e2e_edit_readlink_false_blocks_symlink_traversal_and_readlink() -> Resul
 //
 // The probe is `fstat` on a held *file* handle. `getattr` (src/fs/callbacks.rs)
 // ignores the file handle and re-derives the host path from the cached inode,
-// then `lstat`s it; with `TTL = 0` every `fstat` re-queries the daemon, so no
-// kernel cache sits in front of it. (A `readdir` probe is unreliable here: the
-// kernel issues a readahead READDIR at opendir time, before the swap, and then
-// serves the iterator from that pre-swap cache.) Contents cannot leak through
-// the held fd — it was opened pre-swap against the real in-entry file — so this
-// asserts on the *metadata* the daemon serves: the size of a file that lives
-// OUTSIDE the entry must never be reported through the entry.
+// then `lstat`s it. Standalone getattr replies use `ATTR_TTL = 0`, but the
+// lookup/open path may leave lookup-returned attrs cached for `ENTRY_TTL`; wait
+// for that short entry TTL to expire before probing. (A `readdir` probe is
+// unreliable here: the kernel issues a readahead READDIR at opendir time,
+// before the swap, and then serves the iterator from that pre-swap cache.)
+// Contents cannot leak through the held fd — it was opened pre-swap against the
+// real in-entry file — so this asserts on the *metadata* the daemon serves: the
+// size of a file that lives OUTSIDE the entry must never be reported through the
+// entry.
 //
 // EXPECTED: fails against current code (getattr follows the swapped `sub` and
 // returns the outside file's size) and passes once daemon-side resolution is
@@ -1652,6 +1712,11 @@ fn fuse_e2e_backing_store_swap_stays_confined_to_entry() -> Result<(), Box<dyn E
     // a symlink that escapes the entry target.
     fs::remove_dir_all(&host_sub)?;
     symlink(&outside, &host_sub)?;
+
+    // `open` may have populated lookup-returned attributes with ENTRY_TTL (1s);
+    // wait past that so the fstat probe exercises daemon getattr instead of a
+    // kernel-cached attribute reply.
+    std::thread::sleep(Duration::from_millis(1100));
 
     // fstat the held handle. On vulnerable code the daemon re-derives
     // `docs_target/"sub"/"probe"`, follows the swapped `sub` symlink, and

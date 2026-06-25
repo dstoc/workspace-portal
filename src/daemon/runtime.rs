@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsStr,
     fs,
     io::{BufRead, BufReader, Write},
     os::unix::fs::PermissionsExt,
@@ -9,11 +10,11 @@ use std::{
     },
 };
 
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::{
     error::{Error, Result},
-    fs::PortalFs,
+    fs::{PortalFs, ROOT_INO},
     paths,
     protocol::{self, ControlRequest, ControlResponse, ProtocolErrorCode},
     state::{AccessMode, DaemonStatus, EntryRecord, PortalState},
@@ -156,6 +157,7 @@ impl Daemon {
                     state.add_entry(entry, replace)?;
                 }
                 self.persist_state()?;
+                self.invalidate_root_entry(&name);
                 Ok(ControlResponse::Ack {
                     message: format!("added {name}"),
                 })
@@ -188,6 +190,7 @@ impl Daemon {
                     state.remove_entry(&name)?
                 };
                 self.persist_state()?;
+                self.invalidate_root_entry(&removed.name);
                 Ok(ControlResponse::Ack {
                     message: format!("removed {}", removed.name),
                 })
@@ -248,6 +251,21 @@ impl Daemon {
             &self.config.registry_path,
             &self.config.state.socket,
         )
+    }
+
+    fn invalidate_root_entry(&self, name: &str) {
+        let Some(notifier) = self.mount.as_ref().map(|mount| mount.notifier()) else {
+            return;
+        };
+
+        if let Err(error) = notifier.inval_entry(ROOT_INO, OsStr::new(name)) {
+            warn!(
+                parent = ROOT_INO.0,
+                name = %name,
+                error = %error,
+                "failed to invalidate fuse root entry cache"
+            );
+        }
     }
 
     fn mount_workspace(&mut self) -> Result<()> {
