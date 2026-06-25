@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.8](https://github.com/dstoc/workspace-portal/compare/workspace-portal-v0.1.7...workspace-portal-v0.1.8) (2026-06-25)
+
+
+### Features
+
+* invalidate FUSE dentries on namespace changes ([34f3dbf](https://github.com/dstoc/workspace-portal/commit/34f3dbf95faf9b981143a3bfcc659402bdbf2ed7))
+
+
+### Bug Fixes
+
+* stat open unlinked files by handle ([8212bff](https://github.com/dstoc/workspace-portal/commit/8212bffc425544b19afb8f4c5ee1f70f15e1009c))
+
 ## [0.1.7](https://github.com/dstoc/workspace-portal/compare/workspace-portal-v0.1.6...workspace-portal-v0.1.7) (2026-06-21)
 
 

@@ -885,7 +885,7 @@ dependencies = [
 
 [[package]]
 name = "workspace-portal"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "blake3",
  "clap",
