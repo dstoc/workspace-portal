@@ -45,6 +45,16 @@ fn raw_os_errno(error: &std::io::Error) -> i32 {
     error.raw_os_error().unwrap_or(libc::EIO)
 }
 
+fn is_not_found_error(error: &Error) -> bool {
+    match error {
+        Error::EntryNotFound(_) | Error::TargetNotFound(_) => true,
+        Error::Io(err) => {
+            err.kind() == std::io::ErrorKind::NotFound || err.raw_os_error() == Some(libc::ENOENT)
+        }
+        _ => false,
+    }
+}
+
 fn dir_entries(
     runtime: &mut super::runtime::FuseRuntime,
     state: &PortalState,
@@ -342,7 +352,7 @@ impl Filesystem for PortalFs {
         runtime.forget_inode(ino, nlookup);
     }
 
-    fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
+    fn getattr(&self, _req: &Request, ino: INodeNo, fh: Option<FileHandle>, reply: ReplyAttr) {
         let state = self.state.read().unwrap().clone();
         if ino == ROOT_INO {
             match root_attr(&state) {
@@ -359,6 +369,39 @@ impl Filesystem for PortalFs {
         }
 
         let mut runtime = self.runtime.lock().unwrap();
+        if let Some(fh) = fh {
+            match runtime.open_file_handle_metadata(fh) {
+                Ok(Some((handle_ino, metadata))) if handle_ino == ino => {
+                    let attr = attr_from_metadata(ino, &metadata, false, 0);
+                    debug!("getattr ino={} fh={} -> ok (fstat)", ino.0, fh.0);
+                    reply.attr(&ATTR_TTL, &attr);
+                    return;
+                }
+                Ok(Some((handle_ino, _))) => {
+                    debug!(
+                        "getattr ino={} fh={} -> EBADF (handle inode {})",
+                        ino.0, fh.0, handle_ino.0
+                    );
+                    reply.error(Errno::EBADF);
+                    return;
+                }
+                Ok(None) => {
+                    debug!("getattr ino={} fh={} -> EBADF", ino.0, fh.0);
+                    reply.error(Errno::EBADF);
+                    return;
+                }
+                Err(err) => {
+                    let raw_errno = raw_os_errno(&err);
+                    debug!(
+                        "getattr ino={} fh={} -> errno={} err={}",
+                        ino.0, fh.0, raw_errno, err
+                    );
+                    reply.error(Errno::from_i32(raw_errno));
+                    return;
+                }
+            }
+        }
+
         let Some(path) = runtime.path_for_inode(&state, ino) else {
             debug!("getattr ino={} -> ENOENT (unknown inode)", ino.0);
             reply.error(Errno::ENOENT);
@@ -375,7 +418,7 @@ impl Filesystem for PortalFs {
                 // For soft revocation: the entry was removed but an open fd remains.
                 // Serve attributes via fstat on the open handle so the kernel does not
                 // abort in-flight reads with ENOENT.
-                if matches!(&err, Error::EntryNotFound(_) | Error::TargetNotFound(_))
+                if is_not_found_error(&err)
                     && let Some(metadata) = runtime.open_handle_metadata(ino)
                 {
                     let attr = attr_from_metadata(ino, &metadata, false, 0);
@@ -1949,4 +1992,23 @@ fn statvfs_for(path: &Path) -> Option<libc::statvfs> {
     let mut buf: libc::statvfs = unsafe { std::mem::zeroed() };
     let rc = unsafe { libc::statvfs(c_path.as_ptr(), &mut buf) };
     if rc == 0 { Some(buf) } else { None }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn not_found_detection_includes_backing_store_enoent() {
+        assert!(is_not_found_error(&Error::EntryNotFound("docs".to_owned())));
+        assert!(is_not_found_error(&Error::TargetNotFound(
+            Path::new("/missing").to_path_buf()
+        )));
+        assert!(is_not_found_error(&Error::Io(
+            std::io::Error::from_raw_os_error(libc::ENOENT)
+        )));
+        assert!(!is_not_found_error(&Error::Io(
+            std::io::Error::from_raw_os_error(libc::EACCES)
+        )));
+    }
 }

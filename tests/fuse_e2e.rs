@@ -10,7 +10,7 @@ use std::{
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::{FileTypeExt, symlink};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, symlink};
 
 #[cfg(unix)]
 use serde_json::Value;
@@ -1524,6 +1524,48 @@ fn fuse_e2e_edit_rw_to_ro_preserves_held_write_handle() -> Result<(), Box<dyn Er
 
     // Clean up.
     let _ = fs::remove_file(&script_path);
+    let stop = run(&["stop", &fixture.workspace_arg()], &fixture.envs());
+    assert!(stop.status.success(), "{}", output_text(&stop));
+    wait_for_mounted_state(&fixture, false);
+
+    Ok(())
+}
+
+#[test]
+#[ignore]
+#[cfg(unix)]
+fn fuse_e2e_fstat_on_open_unlinked_file_uses_held_handle() -> Result<(), Box<dyn Error>> {
+    require_fuse_prerequisites();
+
+    let fixture = Fixture::new();
+    start_rw_workspace(&fixture);
+
+    let mounted_lock = fixture.workspace.join("docs/working_copy.lock");
+    fs::write(&mounted_lock, "held-lock")?;
+
+    let held = OpenOptions::new().read(true).open(&mounted_lock)?;
+    fs::remove_file(&mounted_lock)?;
+    assert_eq!(
+        fs::metadata(&mounted_lock).unwrap_err().kind(),
+        ErrorKind::NotFound,
+        "new path lookups should fail after unlink"
+    );
+
+    // Let any lookup/open attributes expire so this probes daemon getattr with
+    // the supplied file handle, matching jj's fstat-on-open-lock path.
+    std::thread::sleep(Duration::from_millis(1100));
+
+    let metadata = held
+        .metadata()
+        .expect("fstat on an open-but-unlinked file must succeed");
+    assert_eq!(
+        metadata.nlink(),
+        0,
+        "fstat on an open unlinked file should report st_nlink == 0"
+    );
+
+    drop(held);
+
     let stop = run(&["stop", &fixture.workspace_arg()], &fixture.envs());
     assert!(stop.status.success(), "{}", output_text(&stop));
     wait_for_mounted_state(&fixture, false);

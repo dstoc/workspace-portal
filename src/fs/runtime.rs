@@ -200,6 +200,26 @@ impl FuseRuntime {
         FileHandle(fh)
     }
 
+    /// Returns metadata from a specific open file handle. Used by `getattr`
+    /// for fstat-style requests where the kernel has supplied an fh; the
+    /// opened file descriptor is authoritative even if the path was later
+    /// unlinked or replaced.
+    pub(crate) fn open_file_handle_metadata(
+        &self,
+        fh: FileHandle,
+    ) -> std::io::Result<Option<(INodeNo, std::fs::Metadata)>> {
+        let Some(handle) = self.handles.get(&fh.0) else {
+            return Ok(None);
+        };
+        if !matches!(handle.kind, OpenHandleKind::File) {
+            return Ok(None);
+        }
+        handle
+            .file
+            .metadata()
+            .map(|metadata| Some((handle.ino, metadata)))
+    }
+
     /// Returns metadata from any open handle for `ino`. Used by `getattr` to serve
     /// attributes for soft-revoked entries that still have open file descriptors.
     pub(crate) fn open_handle_metadata(&self, ino: INodeNo) -> Option<std::fs::Metadata> {
@@ -381,6 +401,40 @@ mod tests {
 
         // 5. Clean up.
         drop(runtime); // drops the File, closing the fd
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn open_file_handle_metadata_survives_unlink() {
+        use std::os::unix::fs::MetadataExt;
+
+        let pid = std::process::id();
+        let tmp_dir = std::env::temp_dir().join(format!("workspace-portal-open-unlinked-{pid}"));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let tmp_file = tmp_dir.join("working_copy.lock");
+
+        let file = std::fs::File::create(&tmp_file).unwrap();
+        let mut runtime = FuseRuntime::new();
+        let ino = INodeNo(42);
+        let fh = runtime.handle_file(ino, file, OpenHandleKind::File, true);
+
+        std::fs::remove_file(&tmp_file).unwrap();
+        assert!(!tmp_file.exists(), "path lookup should fail after unlink");
+
+        let (handle_ino, metadata) = runtime
+            .open_file_handle_metadata(fh)
+            .unwrap()
+            .expect("metadata from the held fd should survive unlink");
+        assert_eq!(handle_ino, ino);
+        assert_eq!(
+            metadata.nlink(),
+            0,
+            "an unlinked-but-open file should report nlink == 0"
+        );
+
+        drop(runtime);
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 
