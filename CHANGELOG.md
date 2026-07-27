@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.9](https://github.com/dstoc/workspace-portal/compare/workspace-portal-v0.1.8...workspace-portal-v0.1.9) (2026-07-27)
+
+
+### Bug Fixes
+
+* raise daemon open file limit ([cc28b4a](https://github.com/dstoc/workspace-portal/commit/cc28b4a79e55d41eda1658cef623bffbffb479fe))
+
 ## [0.1.8](https://github.com/dstoc/workspace-portal/compare/workspace-portal-v0.1.7...workspace-portal-v0.1.8) (2026-06-25)
 
 
