@@ -22,6 +22,71 @@ use crate::{
 
 use super::{mount::wait_for_mount_state, workspace::persist_workspace_state};
 
+const DAEMON_NOFILE_SOFT_LIMIT: libc::rlim_t = 65_536;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OpenFileLimits {
+    soft: libc::rlim_t,
+    hard: libc::rlim_t,
+}
+
+fn desired_nofile_soft_limit(current: libc::rlim_t, hard: libc::rlim_t) -> libc::rlim_t {
+    if current >= DAEMON_NOFILE_SOFT_LIMIT {
+        current
+    } else {
+        DAEMON_NOFILE_SOFT_LIMIT.min(hard)
+    }
+}
+
+fn raise_nofile_soft_limit() -> std::io::Result<OpenFileLimits> {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `limit` is valid writable storage for the kernel to populate.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let desired = desired_nofile_soft_limit(limit.rlim_cur, limit.rlim_max);
+    if desired > limit.rlim_cur {
+        limit.rlim_cur = desired;
+        // SAFETY: `limit` is a valid `rlimit` value obtained from `getrlimit`, with
+        // its soft limit only raised no higher than the inherited hard limit.
+        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+
+    Ok(OpenFileLimits {
+        soft: limit.rlim_cur,
+        hard: limit.rlim_max,
+    })
+}
+
+fn configure_nofile_soft_limit() {
+    match raise_nofile_soft_limit() {
+        Ok(OpenFileLimits { soft, hard }) if soft >= DAEMON_NOFILE_SOFT_LIMIT => {
+            info!(
+                soft_limit = soft,
+                hard_limit = hard,
+                "configured open file limit"
+            );
+        }
+        Ok(OpenFileLimits { soft, hard }) => {
+            warn!(
+                soft_limit = soft,
+                hard_limit = hard,
+                target = DAEMON_NOFILE_SOFT_LIMIT,
+                "inherited open file hard limit is below daemon target"
+            );
+        }
+        Err(error) => {
+            warn!(error = %error, "failed to configure open file limit; continuing");
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct Daemon {
     config: DaemonConfig,
@@ -50,6 +115,7 @@ impl Daemon {
     }
 
     pub(crate) fn run(mut self) -> Result<()> {
+        configure_nofile_soft_limit();
         self.prepare_runtime()?;
 
         let socket_path = self.config.state.socket.clone();
@@ -686,5 +752,23 @@ mod tests {
         let _ = fs::remove_dir_all(&workspace);
         let _ = fs::remove_file(&state_path);
         let _ = fs::remove_dir_all(state_path.parent().unwrap());
+    }
+
+    #[test]
+    fn desired_nofile_limit_keeps_a_higher_inherited_soft_limit() {
+        assert_eq!(desired_nofile_soft_limit(100_000, 200_000), 100_000);
+    }
+
+    #[test]
+    fn desired_nofile_limit_targets_65536_when_supported() {
+        assert_eq!(
+            desired_nofile_soft_limit(1_024, 524_288),
+            DAEMON_NOFILE_SOFT_LIMIT,
+        );
+    }
+
+    #[test]
+    fn desired_nofile_limit_clamps_to_the_inherited_hard_limit() {
+        assert_eq!(desired_nofile_soft_limit(1_024, 4_096), 4_096);
     }
 }
